@@ -1,0 +1,13 @@
+[package]
+name = "rrwm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Wayland 客户端核心库
+wayland-client = "0.31"
+# 用于把 XML 变成 Rust 代码的宏工具
+wayland-scanner = "0.31"
+# 必须添加下面这两个，因为生成的协议代码需要它们
+bitflags = "2.4"
+wayland-backend = "0.3"
