@@ -127,6 +127,45 @@ fn calculate_layout(
         }
     }
 }
+impl LayoutNode {
+    // 这是一个递归函数，用来在树里插入新窗口
+    fn insert_at(
+        &mut self,
+        target_id: &wayland_backend::client::ObjectId,
+        new_win: WindowData,
+        split: SplitType,
+    ) -> bool {
+        match self {
+            LayoutNode::Window(w_data) => {
+                if &w_data.id == target_id {
+                    // 找到了！执行“细胞分裂”
+                    // 1. 把当前的窗口数据取出来
+                    let old_win = w_data.clone();
+                    // 2. 把当前节点从 Window 变成 Container
+                    *self = LayoutNode::Container {
+                        split_type: split,
+                        ratio: 0.5,
+                        left_child: Box::new(LayoutNode::Window(old_win)),
+                        right_child: Box::new(LayoutNode::Window(new_win)),
+                    };
+                    return true;
+                }
+                false
+            }
+            LayoutNode::Container {
+                left_child,
+                right_child,
+                ..
+            } => {
+                // 如果不是，继续往子节点找
+                if left_child.insert_at(target_id, new_win.clone(), split) {
+                    return true;
+                }
+                right_child.insert_at(target_id, new_win, split)
+            }
+        }
+    }
+}
 // 监听注册表（全局菜单）
 impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
     fn event(
@@ -174,41 +213,49 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 state.main_seat = Some(id);
             }
             WmEvent::Window { id } => {
-                println!("-> 发现新窗口，执行 Cosmic 切割");
-                let new_win_data = WindowData {
+                let new_data = WindowData {
                     id: id.id(),
                     window: id.clone(),
                     node: None,
                 };
+                state.windows.push(new_data.clone());
 
-                // 把新窗口存入 flat 列表（用于查找）
-                state.windows.push(new_win_data.clone());
-
-                // --- 核心：Cosmic 自动切割树 ---
                 match state.layout_root.take() {
                     None => {
-                        // 如果是第一个窗口，直接设为根
-                        state.layout_root = Some(LayoutNode::Window(new_win_data));
+                        state.layout_root = Some(LayoutNode::Window(new_data));
                     }
-                    Some(old_root) => {
-                        // 根据当前屏幕比例决定切割方向
-                        let split = if state.current_width > state.current_height {
-                            SplitType::Vertical
+                    Some(mut root) => {
+                        // 1. 找到当前聚焦窗口的坐标
+                        let (target_id, split) = if let Some(f_id) = &state.focused_window {
+                            // 查找这个窗口的宽高比
+                            let split = if let Some(geo) = state.last_geometry.get(f_id) {
+                                if geo.w > geo.h {
+                                    SplitType::Vertical
+                                } else {
+                                    SplitType::Horizontal
+                                }
+                            } else {
+                                SplitType::Vertical
+                            };
+                            (f_id.clone(), split)
                         } else {
-                            SplitType::Horizontal
+                            // 如果没焦点，就找最后一个窗口
+                            let last_id = state
+                                .windows
+                                .get(state.windows.len() - 2)
+                                .map(|w| w.id.clone())
+                                .unwrap();
+                            (last_id, SplitType::Vertical)
                         };
 
-                        // 创建新容器，旧内容在左/上，新窗口在右/下
-                        state.layout_root = Some(LayoutNode::Container {
-                            split_type: split,
-                            ratio: 0.5,
-                            left_child: Box::new(old_root),
-                            right_child: Box::new(LayoutNode::Window(new_win_data)),
-                        });
+                        // 2. 在树中执行切割
+                        root.insert_at(&target_id, new_data, split);
+                        state.layout_root = Some(root);
                     }
                 }
 
-                // 自动聚焦
+                // 记得更新焦点
+                state.focused_window = Some(id.id());
                 if let Some(seat) = &state.main_seat {
                     seat.focus_window(&id);
                 }
@@ -222,12 +269,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         w: state.current_width,
                         h: state.current_height,
                     };
-
-                    // 1. 计算布局
                     calculate_layout(root, screen, &mut results);
 
-                    // 2. 告诉每个窗口它该有多大
-                    for (window, geom) in results {
+                    // 关键：清空并记录当前所有窗口的坐标
+                    state.last_geometry.clear();
+                    for (window, geom) in &results {
+                        state.last_geometry.insert(window.id(), *geom);
                         window.propose_dimensions(geom.w, geom.h);
                     }
                 }
@@ -351,6 +398,8 @@ fn main() {
         current_width: 0,
         current_height: 0,
         layout_root: None,
+        last_geometry: HashMap::new(), // 初始时没有任何几何信息记录，用空的 HashMap
+        focused_window: None,          // 初始时没有任何窗口获得焦点，用 None
     };
     let _registry = display.get_registry(&qh, ());
 
