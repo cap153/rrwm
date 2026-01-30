@@ -19,3 +19,4 @@ rrwm
 ---
 模态/和弦按键 (Chorded Bindings) 可以实现全局的vimium c吗
 ---
+日志信息自动识别中英文环境切换。

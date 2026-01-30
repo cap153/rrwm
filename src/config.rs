@@ -2,9 +2,10 @@ use crate::wm::actions::Action;
 use crate::wm::layout::Direction;
 use crate::protocol::river_wm::river_seat_v1::Modifiers;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::path::PathBuf;
+use std::fs;
 
-// 1. 键盘布局配置 (Colemak 用户最关心的部分)
+// 1. 对应 [input.keyboard] 部分
 #[derive(Deserialize, Debug, Clone)]
 pub struct KeyboardConfig {
     pub layout: String,
@@ -13,34 +14,50 @@ pub struct KeyboardConfig {
     pub model: Option<String>,
 }
 
-// 2. 快捷键配置 (对应你设计的 TOML 格式)
+// 2. 对应 [input] 部分
 #[derive(Deserialize, Debug, Clone)]
-pub struct BindingConfig {
-    pub mods: Vec<String>,
-    pub action: String,
-    pub args: Option<Vec<String>>,
-    pub cmd: Option<String>,
+pub struct InputConfig {
+    pub keyboard: Option<KeyboardConfig>,
 }
 
-// 3. 总配置结构体
-#[derive(Deserialize, Debug)]
+// 3. 根配置结构体
+#[derive(Deserialize, Debug, Clone)]
 pub struct Config {
-    #[serde(default = "default_keyboard")]
-    pub keyboard: KeyboardConfig,
-    pub keybindings: HashMap<String, BindingConfig>,
+    pub input: Option<InputConfig>,
+    // 以后这里可以加 keybindings 等
 }
 
-// 默认键盘布局配置 (兜底方案)
-fn default_keyboard() -> KeyboardConfig {
-    KeyboardConfig {
-        layout: "us".to_string(),
-        variant: None,
-        options: None,
-        model: None,
+impl Config {
+    /// 获取配置文件路径：~/.config/river/rrwm.toml
+    pub fn get_path() -> PathBuf {
+        let home = std::env::var("HOME").expect("找不到 HOME 环境变量");
+        PathBuf::from(home).join(".config").join("river").join("rrwm.toml")
+    }
+
+    /// 加载配置文件
+    pub fn load() -> Self {
+        let path = Self::get_path();
+        
+        if let Ok(content) = fs::read_to_string(&path) {
+            match toml::from_str::<Config>(&content) {
+                Ok(config) => {
+                    println!("-> 已加载配置文件: {:?}", path);
+                    return config;
+                }
+                Err(e) => {
+                    eprintln!("-> 配置文件解析失败: {}，将使用默认设置", e);
+                }
+            }
+        } else {
+            println!("-> 未找到配置文件 {:?}，将使用默认设置", path);
+        }
+
+        // 如果文件不存在或解析失败，返回一个全空的配置
+        Config { input: None }
     }
 }
 
-
+// --- 保留原有的默认快捷键逻辑，用于过渡 ---
 
 pub struct DefaultBinding {
     pub mods: Modifiers,

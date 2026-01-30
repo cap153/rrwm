@@ -52,6 +52,7 @@ pub struct WindowData {
 }
 
 pub struct AppState {
+    pub config: crate::config::Config,
     pub river_wm: Option<RiverWindowManagerV1>,
     pub windows: Vec<WindowData>,
     pub outputs: HashMap<ObjectId, OutputData>,
@@ -401,35 +402,54 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
         qh: &QueueHandle<Self>,
     ) {
         if let ConfigEvent::XkbKeyboard { id } = event {
-            println!("-> 发现 XKB 键盘设备，准备加载 Colemak...");
+            // 1. 尝试从配置中获取键盘布局设置 (类似 JS 的 config.input?.keyboard)
+            if let Some(kb_cfg) = state
+                .config
+                .input
+                .as_ref()
+                .and_then(|i| i.keyboard.as_ref())
+            {
+                println!(
+                    "-> 检测到配置，准备为键盘加载布局: {} ({:?})",
+                    kb_cfg.layout, kb_cfg.variant
+                );
 
-            // --- 核心“硬核”代码开始 ---
-            // 1. 使用 xkbcommon 创建 Colemak 映射表字符串
-            let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-            let keymap = xkb::Keymap::new_from_names(
-                &context,
-                "evdev",
-                "pc105",
-                "us",
-                "colemak",
-                None,                         // 你想要的 Colemak！
-                xkb::KEYMAP_COMPILE_NO_FLAGS, // 修正点 1：KEYSYM -> KEYMAP
-            );
+                let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 
-            if let Some(keymap) = keymap {
-                let keymap_str = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+                // 2. 将 TOML 里的字符串传给 xkbcommon
 
-                // 2. 创建一个临时文件（在内存中）
-                let mut temp_file = tempfile::tempfile().expect("无法创建临时文件");
-                temp_file
-                    .write_all(keymap_str.as_bytes())
-                    .expect("无法写入键位图");
+                // 先把这些可选参数提取出来，强制它们变成 &str
+                let rules = "evdev".to_string();
+                let model = kb_cfg.model.clone().unwrap_or_else(|| "pc105".to_string());
+                let layout = kb_cfg.layout.clone();
+                let variant = kb_cfg.variant.clone().unwrap_or_default();
+                let options = kb_cfg.options.clone();
 
-                // 3. 把这把“钥匙”递给 River，创建一个 River 端的 Keymap 对象
-                if let Some(mgr) = &state.xkb_config {
-                    mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
-                    state.keyboards.push(id);
+                let keymap = xkb::Keymap::new_from_names(
+                    &context,
+                    &rules,   // 传入 &String，匹配 &S
+                    &model,   // 传入 &String，匹配 &S
+                    &layout,  // 传入 &String，匹配 &S
+                    &variant, // 传入 &String，匹配 &S
+                    options,  // 传入 Option<String>，匹配 Option<S>
+                    xkb::KEYMAP_COMPILE_NO_FLAGS,
+                );
+
+                if let Some(keymap) = keymap {
+                    let keymap_str = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+                    let mut temp_file = tempfile::tempfile().expect("无法创建临时文件");
+                    temp_file
+                        .write_all(keymap_str.as_bytes())
+                        .expect("无法写入键位图");
+
+                    if let Some(mgr) = &state.xkb_config {
+                        // 3. 递交“钥匙”
+                        mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
+                        state.keyboards.push(id);
+                    }
                 }
+            } else {
+                println!("-> 配置文件中未设置键盘布局，保持系统默认（QWERTY）。");
             }
         }
     }

@@ -2,17 +2,20 @@ pub mod config;
 pub mod protocol;
 pub mod wm;
 
+use crate::config::Config;
 use crate::wm::AppState;
 use std::collections::HashMap;
 use wayland_client::Connection;
 
 fn main() {
+    let config = Config::load();
     let conn = Connection::connect_to_env().expect("请在 River 环境下运行");
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
 
     let mut state = AppState {
+        config: config,
         river_wm: None,
         windows: Vec::new(),
         outputs: HashMap::new(),

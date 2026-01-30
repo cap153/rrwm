@@ -3,7 +3,7 @@
 [input.keyboard]
 layout = "us"
 variant = "colemak"
-options = "caps:escape" # 支持多个选项，用逗号隔开
+options = "caps:swapescape" # 支持多个选项，用逗号隔开
 model = "pc105" # 一般可选，默认 pc105
 
 [keybindings]
