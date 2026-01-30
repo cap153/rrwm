@@ -1,10 +1,10 @@
-pub mod protocol;
 pub mod config;
+pub mod protocol;
 pub mod wm;
 
 use crate::wm::AppState;
 use std::collections::HashMap;
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::Connection;
 
 fn main() {
     let conn = Connection::connect_to_env().expect("请在 River 环境下运行");
@@ -24,6 +24,9 @@ fn main() {
         focused_window: None,
         xkb_manager: None,
         key_bindings: Vec::new(),
+        input_manager: None,
+        xkb_config: None,
+        keyboards: Vec::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

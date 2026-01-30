@@ -19,14 +19,3 @@ rrwm
 ---
 模态/和弦按键 (Chorded Bindings) 可以实现全局的vimium c吗
 ---
-```rust
-// config.rs 想象中的样子
-pub fn get_default_bindings() -> Vec<(Modifiers, &str, Action)> {
-    vec![
-        (Modifiers::Super, "Return", Action::Spawn("kitty".to_string())),
-        (Modifiers::Super, "Q",      Action::CloseFocused),
-        (Modifiers::Super, "Right",  Action::FocusDir(Direction::Right)),
-        // ...
-    ]
-}
-```

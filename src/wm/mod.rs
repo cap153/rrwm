@@ -3,6 +3,8 @@ pub mod layout;
 
 use self::actions::Action;
 use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
+use crate::protocol::river_input::river_input_device_v1::RiverInputDeviceV1;
+use crate::protocol::river_input::river_input_manager_v1::RiverInputManagerV1;
 use crate::protocol::river_wm::{
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
@@ -14,7 +16,18 @@ use crate::protocol::river_xkb::{
     river_xkb_binding_v1::{Event as BindingEvent, RiverXkbBindingV1},
     river_xkb_bindings_v1::RiverXkbBindingsV1,
 };
+use crate::protocol::river_xkb_config::river_xkb_config_v1::{
+    Event as ConfigEvent, KeymapFormat, RiverXkbConfigV1,
+};
+use crate::protocol::river_xkb_config::river_xkb_keyboard_v1::{
+    Event as KbEvent, RiverXkbKeyboardV1,
+};
+use crate::protocol::river_xkb_config::river_xkb_keymap_v1::{
+    Event as KeymapEvent, RiverXkbKeymapV1,
+};
 use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::io::AsFd;
 use wayland_backend::client::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -50,6 +63,9 @@ pub struct AppState {
     pub focused_window: Option<ObjectId>,
     pub xkb_manager: Option<RiverXkbBindingsV1>,
     pub key_bindings: Vec<KeyBinding>,
+    pub input_manager: Option<RiverInputManagerV1>,
+    pub xkb_config: Option<RiverXkbConfigV1>,
+    pub keyboards: Vec<RiverXkbKeyboardV1>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -81,6 +97,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                     // 注意：这里版本是 2
                     let xkb = proxy.bind::<RiverXkbBindingsV1, _, _>(name, 2, qh, ());
                     state.xkb_manager = Some(xkb);
+                }
+                "river_input_manager_v1" => {
+                    println!("[ID:{}] 绑定：输入管理器", name);
+                    let manager = proxy.bind::<RiverInputManagerV1, _, _>(name, 1, qh, ());
+                    state.input_manager = Some(manager);
+                }
+                "river_xkb_config_v1" => {
+                    println!("[ID:{}] 绑定：XKB 配置器", name);
+                    let config = proxy.bind::<RiverXkbConfigV1, _, _>(name, 1, qh, ());
+                    state.xkb_config = Some(config);
                 }
                 _ => {}
             }
@@ -362,5 +388,115 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
                 state.perform_action(kb.action.clone());
             }
         }
+    }
+}
+// 1. 处理 XKB 配置管理器
+impl Dispatch<RiverXkbConfigV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &RiverXkbConfigV1,
+        event: ConfigEvent,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let ConfigEvent::XkbKeyboard { id } = event {
+            println!("-> 发现 XKB 键盘设备，准备加载 Colemak...");
+
+            // --- 核心“硬核”代码开始 ---
+            // 1. 使用 xkbcommon 创建 Colemak 映射表字符串
+            let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            let keymap = xkb::Keymap::new_from_names(
+                &context,
+                "evdev",
+                "pc105",
+                "us",
+                "colemak",
+                None,                         // 你想要的 Colemak！
+                xkb::KEYMAP_COMPILE_NO_FLAGS, // 修正点 1：KEYSYM -> KEYMAP
+            );
+
+            if let Some(keymap) = keymap {
+                let keymap_str = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+
+                // 2. 创建一个临时文件（在内存中）
+                let mut temp_file = tempfile::tempfile().expect("无法创建临时文件");
+                temp_file
+                    .write_all(keymap_str.as_bytes())
+                    .expect("无法写入键位图");
+
+                // 3. 把这把“钥匙”递给 River，创建一个 River 端的 Keymap 对象
+                if let Some(mgr) = &state.xkb_config {
+                    mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
+                    state.keyboards.push(id);
+                }
+            }
+        }
+    }
+    // 注册子对象：键盘
+    wayland_client::event_created_child!(AppState, RiverXkbConfigV1, [
+        1 => (RiverXkbKeyboardV1, ())
+    ]);
+}
+
+// 2. 处理 Keymap 对象的成功/失败反馈
+impl Dispatch<RiverXkbKeymapV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &RiverXkbKeymapV1,
+        event: KeymapEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            KeymapEvent::Success => {
+                println!("-> 键位图创建成功，正在应用到所有键盘...");
+                for kb in &state.keyboards {
+                    kb.set_keymap(proxy); // 终于把 Colemak 设置上去了！
+                }
+            }
+            KeymapEvent::Failure { error_msg } => {
+                eprintln!("-> 键位图加载失败: {}", error_msg);
+            }
+        }
+    }
+}
+
+// 3. 其他必须有的空 Dispatch 实现，防止崩溃
+impl Dispatch<RiverInputManagerV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &RiverInputManagerV1,
+        _: crate::protocol::river_input::river_input_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+    wayland_client::event_created_child!(AppState, RiverInputManagerV1, [
+        1 => (RiverInputDeviceV1, ())
+    ]);
+}
+impl Dispatch<RiverInputDeviceV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &RiverInputDeviceV1,
+        _: crate::protocol::river_input::river_input_device_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &RiverXkbKeyboardV1,
+        _: KbEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }

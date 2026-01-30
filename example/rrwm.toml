@@ -1,0 +1,29 @@
+# RRWM 窗口管理器配置文件示例
+
+[input.keyboard]
+layout = "us"
+variant = "colemak"
+options = "caps:escape" # 支持多个选项，用逗号隔开
+model = "pc105" # 一般可选，默认 pc105
+
+[keybindings]
+# 基本应用启动
+Return = { mods = ["Super"], action = "spawn", args = ["kitty"] }
+d = { mods = ["Super"], action = "spawn", args = ["rofi", "-show", "drun"] }
+
+# 支持环境变量和路径展开
+b = { mods = ["Super"], action = "spawn", args = ["$BROWSER"] }
+e = { mods = ["Super"], action = "spawn", args = ["~/Applications/nvim.AppImage"] }
+
+# Shell 命令支持
+p = { mods = ["Super"], action = "shell", cmd = "grim -g \"$(slurp)\" - | wl-copy" }
+v = { mods = ["Super"], action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
+
+# 窗口管理
+q = { mods = ["Super"], action = "close_window" }
+f = { mods = ["Super"], action = "toggle_fullscreen" }
+
+# 工作区配置
+[workspaces]
+focus_mods = ["Super"]           # Super+1-9 切换工作区
+move_mods = ["Super", "Shift"]   # Super+Shift+1-9 移动窗口到工作区

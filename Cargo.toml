@@ -10,4 +10,7 @@ wayland-client = "0.31"
 wayland-scanner = "0.31"
 bitflags = "2.4"
 wayland-backend = "0.3"
-xkbcommon = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+xkbcommon = { version = "0.7", features = ["wayland"] }
+tempfile = "3.8"
