@@ -165,6 +165,49 @@ impl LayoutNode {
             }
         }
     }
+    // 递归删除函数
+    // 返回值：Option<LayoutNode> 是处理后的新节点。如果返回 None，说明该分支被删空了。
+    fn remove_at(
+        node: LayoutNode,
+        target_id: &wayland_backend::client::ObjectId,
+    ) -> Option<LayoutNode> {
+        match node {
+            LayoutNode::Window(w_data) => {
+                if &w_data.id == target_id {
+                    // 如果自己就是要删除的窗口，返回 None（消失）
+                    None
+                } else {
+                    // 否则保留自己
+                    Some(LayoutNode::Window(w_data))
+                }
+            }
+            LayoutNode::Container {
+                split_type,
+                ratio,
+                left_child,
+                right_child,
+            } => {
+                // 递归处理子节点
+                let new_left = LayoutNode::remove_at(*left_child, target_id);
+                let new_right = LayoutNode::remove_at(*right_child, target_id);
+
+                match (new_left, new_right) {
+                    // 1. 左右都还在：保持容器结构
+                    (Some(l), Some(r)) => Some(LayoutNode::Container {
+                        split_type,
+                        ratio,
+                        left_child: Box::new(l),
+                        right_child: Box::new(r),
+                    }),
+                    // 2. 左边没了：右边“上位”替代父容器
+                    (None, Some(r)) => Some(r),
+                    // 3. 右边没了：左边“上位”替代父容器
+                    (None, None) => None, // 逻辑上不应该出现，除非全是空的
+                    (Some(l), None) => Some(l),
+                }
+            }
+        }
+    }
 }
 // 监听注册表（全局菜单）
 impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
@@ -261,6 +304,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
             }
             WmEvent::ManageStart => {
+                // 在 ManageStart 里的焦点逻辑部分：
+                if let Some(f_id) = &state.focused_window {
+                    if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
+                        if let Some(seat) = &state.main_seat {
+                            seat.focus_window(&w_data.window);
+                        }
+                    }
+                }
                 if let Some(root) = &state.layout_root {
                     let mut results = Vec::new();
                     let screen = Geometry {
@@ -273,11 +324,16 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                     // 关键：清空并记录当前所有窗口的坐标
                     state.last_geometry.clear();
-                    for (window, geom) in &results {
-                        state.last_geometry.insert(window.id(), *geom);
+                    // 修改 ManageStart 内部的循环
+                    for (window, geom) in results {
+                        state.last_geometry.insert(window.id(), geom);
                         window.propose_dimensions(geom.w, geom.h);
+                        window.set_tiled(
+                            river_protocol::river_window_v1::Edges::all(),
+                        );
                     }
                 }
+
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
@@ -340,7 +396,6 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
                 println!("-> 显示器分辨率更新: {}x{}", width, height);
                 state.current_width = width;
                 state.current_height = height;
-                // 同时更新 HashMap 里的数据
                 state
                     .outputs
                     .insert(proxy.id(), OutputData { width, height });
@@ -351,24 +406,63 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
 }
 impl Dispatch<RiverSeatV1, ()> for AppState {
     fn event(
-        _: &mut Self,
-        _: &river_protocol::river_seat_v1::RiverSeatV1,
-        _: river_protocol::river_seat_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
+        state: &mut Self,
+        proxy: &RiverSeatV1, // 这个 proxy 就是当前的 seat (鼠标/键盘组合)
+        event: river_protocol::river_seat_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
     ) {
+        use river_protocol::river_seat_v1::Event as SeatEvent;
+        match event {
+            // 当用户点击或触摸某个窗口时触发
+            SeatEvent::WindowInteraction { window } => {
+                println!("-> 鼠标点击窗口: {:?}", window.id());
+                // 1. 更新我们的全局状态，记录现在谁是焦点
+                state.focused_window = Some(window.id());
+                // 2. 关键指令：告诉 River 正式把键盘焦点给这个窗口
+                proxy.focus_window(&window);
+            }
+
+            // 可选：实现“焦点跟随鼠标”（鼠标移上去就聚焦，不需要点击）
+            // 如果你喜欢这种风格，可以取消下面这一行的注释：
+            // SeatEvent::PointerEnter { window } => { proxy.focus_window(&window); state.focused_window = Some(window.id()); }
+            _ => {}
+        }
     }
 }
 impl Dispatch<RiverWindowV1, ()> for AppState {
     fn event(
-        _: &mut Self,
-        _: &river_protocol::river_window_v1::RiverWindowV1,
-        _: river_protocol::river_window_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
+        state: &mut Self,
+        proxy: &RiverWindowV1,
+        event: river_protocol::river_window_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
     ) {
+        use river_protocol::river_window_v1::Event as WinEvent;
+        match event {
+            WinEvent::Closed => {
+                let target_id = proxy.id();
+                println!("-> 窗口已关闭: {:?}", target_id);
+
+                // 1. 从树中移除（智能填充逻辑）
+                if let Some(root) = state.layout_root.take() {
+                    state.layout_root = LayoutNode::remove_at(root, &target_id);
+                }
+
+                // 2. 从 flat 列表中移除
+                state.windows.retain(|w| w.id != target_id);
+
+                // 3. 更新焦点：如果关掉的是焦点窗口，把焦点给剩下的最后一个窗口
+                if state.focused_window.as_ref() == Some(&target_id) {
+                    state.focused_window = state.windows.last().map(|w| w.id.clone());
+                }
+
+                // 注意：这里不需要手动重画，River 随后会自动发 ManageStart
+            }
+            _ => {}
+        }
     }
 }
 
