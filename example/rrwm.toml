@@ -1,11 +1,11 @@
 # RRWM 窗口管理器配置文件示例
-
 [input.keyboard]
 layout = "us"
 variant = "colemak"
-options = "caps:swapescape" # 支持多个选项，用逗号隔开
+options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
 model = "pc105" # 一般可选，默认 pc105
 
+# 下面是设想的键位配置，缺点是无法使用不同的Mod对同一个字母组合，后续完善
 [keybindings]
 # 基本应用启动
 Return = { mods = ["Super"], action = "spawn", args = ["kitty"] }
