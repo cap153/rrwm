@@ -1,4 +1,4 @@
-use crate::protocol::river::river_window_v1::RiverWindowV1;
+use crate::protocol::river_wm::river_window_v1::RiverWindowV1;
 use crate::wm::WindowData;
 use wayland_backend::client::ObjectId;
 
@@ -6,6 +6,14 @@ use wayland_backend::client::ObjectId;
 pub enum SplitType {
     Horizontal,
     Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -1,22 +1,29 @@
-pub mod layout;
 pub mod actions;
+pub mod layout;
 
-use std::collections::HashMap;
-use wayland_backend::client::ObjectId;
-use wayland_client::protocol::wl_registry;
-use wayland_client::{Connection, Dispatch, QueueHandle, Proxy};
-
-// 导入生成的 River 协议
-use crate::protocol::river::{
+use self::actions::Action;
+use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
+use crate::protocol::river_wm::{
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
     river_seat_v1::RiverSeatV1,
     river_window_manager_v1::RiverWindowManagerV1,
-    river_window_v1::{RiverWindowV1, Edges},
+    river_window_v1::{Edges, RiverWindowV1},
 };
+use crate::protocol::river_xkb::{
+    river_xkb_binding_v1::{Event as BindingEvent, RiverXkbBindingV1},
+    river_xkb_bindings_v1::RiverXkbBindingsV1,
+};
+use std::collections::HashMap;
+use wayland_backend::client::ObjectId;
+use wayland_client::protocol::wl_registry;
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use xkbcommon::xkb;
 
-// 导入本地布局逻辑
-use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
+pub struct KeyBinding {
+    pub obj: RiverXkbBindingV1,
+    pub action: Action,
+}
 
 #[derive(Debug, Clone)]
 pub struct OutputData {
@@ -41,6 +48,8 @@ pub struct AppState {
     pub layout_root: Option<LayoutNode>,
     pub last_geometry: HashMap<ObjectId, Geometry>,
     pub focused_window: Option<ObjectId>,
+    pub xkb_manager: Option<RiverXkbBindingsV1>,
+    pub key_bindings: Vec<KeyBinding>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -59,10 +68,21 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
             version: _,
         } = event
         {
-            if interface == "river_window_manager_v1" {
-                println!("[ID:{}] 发现 River 管理接口，开始绑定...", name);
-                let wm = proxy.bind::<RiverWindowManagerV1, _, _>(name, 3, qh, ());
-                state.river_wm = Some(wm);
+            // 使用 match 代替 if，确保逻辑唯一性
+            match interface.as_str() {
+                "river_window_manager_v1" => {
+                    println!("[ID:{}] 绑定：窗口管理器", name);
+                    // 注意：这里必须指定版本为 3
+                    let wm = proxy.bind::<RiverWindowManagerV1, _, _>(name, 3, qh, ());
+                    state.river_wm = Some(wm);
+                }
+                "river_xkb_bindings_v1" => {
+                    println!("[ID:{}] 绑定：快捷键管理器", name);
+                    // 注意：这里版本是 2
+                    let xkb = proxy.bind::<RiverXkbBindingsV1, _, _>(name, 2, qh, ());
+                    state.xkb_manager = Some(xkb);
+                }
+                _ => {}
             }
         }
     }
@@ -73,19 +93,38 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverWindowManagerV1,
-        event: crate::protocol::river::river_window_manager_v1::Event,
+        event: crate::protocol::river_wm::river_window_manager_v1::Event,
         _data: &(),
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river::river_window_manager_v1::Event as WmEvent;
+        use crate::protocol::river_wm::river_window_manager_v1::Event as WmEvent;
         match event {
             WmEvent::Output { id: _ } => {
                 // 由 Dispatch<RiverOutputV1> 处理详细分辨率
             }
+            // src/wm/mod.rs 里的 WmEvent::Seat 分支
             WmEvent::Seat { id } => {
                 println!("-> 发现新输入设备 (Seat)");
-                state.main_seat = Some(id);
+                state.main_seat = Some(id.clone());
+
+                if let Some(xkb_mgr) = &state.xkb_manager {
+                    // 这里 qh 已经在 event 函数参数里了，直接用
+                    let defaults = crate::config::get_default_bindings();
+
+                    for b in defaults {
+                        // 将 key 字符串转为 keysym 并取原始 u32 值
+                        let keysym = xkb::keysym_from_name(b.key, xkb::KEYSYM_NO_FLAGS).raw();
+
+                        // 注意这里的 b.mods，它已经是 Modifiers 类型了
+                        let binding_obj = xkb_mgr.get_xkb_binding(&id, keysym, b.mods, qh, ());
+
+                        state.key_bindings.push(KeyBinding {
+                            obj: binding_obj,
+                            action: b.action,
+                        });
+                    }
+                }
             }
             WmEvent::Window { id } => {
                 println!("-> 发现新窗口，执行 Cosmic 切割: {:?}", id.id());
@@ -104,14 +143,20 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     Some(mut root) => {
                         let (target_id, split) = if let Some(f_id) = &state.focused_window {
                             let split = if let Some(geo) = state.last_geometry.get(f_id) {
-                                if geo.w > geo.h { SplitType::Vertical } else { SplitType::Horizontal }
+                                if geo.w > geo.h {
+                                    SplitType::Vertical
+                                } else {
+                                    SplitType::Horizontal
+                                }
                             } else {
                                 SplitType::Vertical
                             };
                             (f_id.clone(), split)
                         } else {
                             // 无焦点时默认切分上一个窗口
-                            let last_id = state.windows.get(state.windows.len().saturating_sub(2))
+                            let last_id = state
+                                .windows
+                                .get(state.windows.len().saturating_sub(2))
                                 .map(|w| w.id.clone())
                                 .unwrap();
                             (last_id, SplitType::Vertical)
@@ -139,7 +184,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 // 计算并应用布局
                 if let Some(root) = &state.layout_root {
                     let mut results = Vec::new();
-                    let screen = Geometry { x: 0, y: 0, w: state.current_width, h: state.current_height };
+                    let screen = Geometry {
+                        x: 0,
+                        y: 0,
+                        w: state.current_width,
+                        h: state.current_height,
+                    };
                     calculate_layout(root, screen, &mut results);
 
                     state.last_geometry.clear();
@@ -149,16 +199,25 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         window.set_tiled(Edges::all());
                     }
                 }
+                for kb in &state.key_bindings {
+                    kb.obj.enable();
+                }
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
                 if let Some(root) = &state.layout_root {
                     let mut results = Vec::new();
-                    let screen = Geometry { x: 0, y: 0, w: state.current_width, h: state.current_height };
+                    let screen = Geometry {
+                        x: 0,
+                        y: 0,
+                        w: state.current_width,
+                        h: state.current_height,
+                    };
                     calculate_layout(root, screen, &mut results);
 
                     for (window, geom) in results {
-                        if let Some(w_data) = state.windows.iter_mut().find(|w| w.id == window.id()) {
+                        if let Some(w_data) = state.windows.iter_mut().find(|w| w.id == window.id())
+                        {
                             if w_data.node.is_none() {
                                 w_data.node = Some(window.get_node(qh, ()));
                             }
@@ -187,18 +246,20 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverOutputV1,
-        event: crate::protocol::river::river_output_v1::Event,
+        event: crate::protocol::river_wm::river_output_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river::river_output_v1::Event as OutEvent;
+        use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
         match event {
             OutEvent::Dimensions { width, height } => {
                 println!("-> 显示器分辨率更新: {}x{}", width, height);
                 state.current_width = width;
                 state.current_height = height;
-                state.outputs.insert(proxy.id(), OutputData { width, height });
+                state
+                    .outputs
+                    .insert(proxy.id(), OutputData { width, height });
             }
             _ => {}
         }
@@ -210,12 +271,12 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverSeatV1,
-        event: crate::protocol::river::river_seat_v1::Event,
+        event: crate::protocol::river_wm::river_seat_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river::river_seat_v1::Event as SeatEvent;
+        use crate::protocol::river_wm::river_seat_v1::Event as SeatEvent;
         match event {
             SeatEvent::WindowInteraction { window } => {
                 println!("-> 鼠标点击窗口: {:?}", window.id());
@@ -232,12 +293,12 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverWindowV1,
-        event: crate::protocol::river::river_window_v1::Event,
+        event: crate::protocol::river_wm::river_window_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river::river_window_v1::Event as WinEvent;
+        use crate::protocol::river_wm::river_window_v1::Event as WinEvent;
         match event {
             WinEvent::Closed => {
                 let target_id = proxy.id();
@@ -261,5 +322,45 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
 // --- 6. 监听 RiverNodeV1 (渲染节点，目前为空) ---
 impl Dispatch<RiverNodeV1, ()> for AppState {
-    fn event(_: &mut Self, _: &RiverNodeV1, _: crate::protocol::river::river_node_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &RiverNodeV1,
+        _: crate::protocol::river_wm::river_node_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// 处理快捷键全局管理器
+impl Dispatch<RiverXkbBindingsV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &RiverXkbBindingsV1,
+        _: crate::protocol::river_xkb::river_xkb_bindings_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// 处理具体的按键按下/抬起事件
+impl Dispatch<RiverXkbBindingV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &RiverXkbBindingV1,
+        event: BindingEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let BindingEvent::Pressed = event {
+            // 查找是哪个 Action 绑定的这个对象 ID
+            if let Some(kb) = state.key_bindings.iter().find(|b| b.obj.id() == proxy.id()) {
+                state.perform_action(kb.action.clone());
+            }
+        }
+    }
 }
