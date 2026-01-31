@@ -30,6 +30,7 @@ fn main() {
         input_manager: None,
         xkb_config: None,
         keyboards: Vec::new(),
+        layer_shell_manager: None,
     };
 
     let _registry = display.get_registry(&qh, ());
