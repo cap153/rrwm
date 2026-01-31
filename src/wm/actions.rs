@@ -6,6 +6,8 @@ use crate::wm::AppState;
 pub enum Action {
     CloseFocused,
     Focus(Direction),
+    FocusTag(u32),      // 切换到某个标签掩码
+    MoveToTag(u32),     // 将窗口移动到某个标签掩码
     Spawn(Vec<String>), // 纯净启动：[程序名, 参数1, 参数2]
     Shell(String),      // Shell 启动：一整串命令字符串
 }
@@ -19,21 +21,40 @@ impl Action {
 
             // --- 内部指令：焦点切换 ---
             "focus" => {
-                // 从 args 数组的第一个元素读取方向
-                let dir_str = args
+                let arg = args
                     .as_ref()
                     .and_then(|v| v.get(0))
                     .map(|s| s.as_str())
-                    .unwrap_or("right"); // 默认向右
-
-                let dir = match dir_str.to_lowercase().as_str() {
-                    "left" => Direction::Left,
-                    "right" => Direction::Right,
-                    "up" => Direction::Up,
-                    "down" => Direction::Down,
-                    _ => Direction::Right,
-                };
-                Action::Focus(dir)
+                    .unwrap_or("right");
+                // 判断参数是“方向字符串”还是“数字字符串”
+                match arg.parse::<u32>() {
+                    Ok(tag_idx) => Action::FocusTag(1 << (tag_idx.saturating_sub(1))),
+                    Err(_) => {
+                        // 如果是方向
+                        let dir = match arg.to_lowercase().as_str() {
+                            "left" => Direction::Left,
+                            "up" => Direction::Up,
+                            "down" => Direction::Down,
+                            _ => Direction::Right,
+                        };
+                        Action::Focus(dir)
+                    }
+                }
+            }
+            // 对应 Action::MoveToTag (Super+Shift+数字)
+            "move" => {
+                let arg = args
+                    .as_ref()
+                    .and_then(|v| v.get(0))
+                    .map(|s| s.as_str())
+                    .unwrap_or("1");
+                match arg.parse::<u32>() {
+                    Ok(tag_idx) => Action::MoveToTag(1 << (tag_idx.saturating_sub(1))),
+                    Err(_) => {
+                        // 这里可以以后扩展 move left/right 到跨标签
+                        Action::Shell("true".to_string())
+                    }
+                }
             }
 
             // "spawn" 模式：直接启动，不经过 sh
@@ -58,6 +79,22 @@ impl Action {
 impl AppState {
     pub fn perform_action(&mut self, action: Action) {
         match action {
+            // --- 标签切换逻辑 ---
+            Action::FocusTag(mask) => {
+                println!("-> 切换标签掩码为: {:b}", mask);
+                self.focused_tags = mask;
+                // 注意：修改 state 后，River 随后会自动触发 ManageStart 重新渲染
+            }
+
+            // --- 移动窗口到标签逻辑 ---
+            Action::MoveToTag(mask) => {
+                if let Some(f_id) = &self.focused_window {
+                    if let Some(w_data) = self.windows.iter_mut().find(|w| &w.id == f_id) {
+                        println!("-> 将窗口 {:?} 移动到标签掩码: {:b}", f_id, mask);
+                        w_data.tags = mask;
+                    }
+                }
+            }
             // 直接启动逻辑：更轻量，无 Shell 开销
             Action::Spawn(cmd_list) => {
                 if cmd_list.is_empty() {
@@ -87,10 +124,22 @@ impl AppState {
                     .ok();
             }
             Action::Focus(dir) => {
+                // 1. 定义一个变量记录是否在本页成功跳转了焦点
+                let mut moved_locally = false;
+                // 2. 只有在有焦点窗口时才尝试找邻居
                 if let Some(f_id) = &self.focused_window {
                     if let Some(new_focus) = self.find_neighbor(f_id, dir) {
-                        self.focused_window = Some(new_focus);
-                        // 注意：这里只是改变了变量，真正的指令在 ManageStart 里发送给 River
+                        self.focused_window = Some(new_focus.clone());
+                        self.tag_focus_history.insert(self.focused_tags, new_focus);
+                        moved_locally = true;
+                    }
+                }
+                // 3. 如果没有在本页跳转成功（可能是没邻居，也可能是根本没窗口）
+                if !moved_locally {
+                    match dir {
+                        Direction::Right => self.cycle_tag(1),  // 向右切到下一个标签
+                        Direction::Left  => self.cycle_tag(-1), // 向左切到上一个标签
+                        _ => {} // 上下方向通常不跨标签
                     }
                 }
             }
@@ -104,43 +153,85 @@ impl AppState {
         }
     }
 
-    // 一个简单的几何邻居查找算法
+    /// 标签页流转逻辑：实现类似 bspwm 的 desktop -f next/prev
+    fn cycle_tag(&mut self, delta: i32) {
+        // 假设我们只用 1-9 号标签
+        let mut current_idx = 0;
+        for i in 0..9 {
+            if (self.focused_tags & (1 << i)) != 0 {
+                current_idx = i as i32;
+                break;
+            }
+        }
+
+        let next_idx = (current_idx + delta).rem_euclid(9) as u32;
+        let next_mask = 1 << next_idx;
+
+        println!("-> 触碰边界，流转至 Tag {}", next_idx + 1);
+        self.focused_tags = next_mask;
+    }
+
+    /// 邻居查找，严格方向判定
     fn find_neighbor(
         &self,
         current_id: &wayland_backend::client::ObjectId,
         dir: Direction,
     ) -> Option<wayland_backend::client::ObjectId> {
         let cur_geo = self.last_geometry.get(current_id)?;
-        let cur_center_x = cur_geo.x + cur_geo.w / 2;
-        let cur_center_y = cur_geo.y + cur_geo.h / 2;
 
         self.windows
             .iter()
-            .filter(|w| &w.id != current_id) // 排除自己
+            .filter(|w| &w.id != current_id && (w.tags & self.focused_tags) != 0)
             .filter_map(|w| {
                 let g = self.last_geometry.get(&w.id)?;
-                let center_x = g.x + g.w / 2;
-                let center_y = g.y + g.h / 2;
 
-                // 根据方向过滤
-                let is_in_dir = match dir {
-                    Direction::Left => center_x < cur_center_x,
-                    Direction::Right => center_x > cur_center_x,
-                    Direction::Up => center_y < cur_center_y,
-                    Direction::Down => center_y > cur_center_y,
+                // 判定是否在方向上
+                let is_in_direction = match dir {
+                    Direction::Left => g.x + g.w <= cur_geo.x,
+                    Direction::Right => g.x >= cur_geo.x + cur_geo.w,
+                    Direction::Up => g.y + g.h <= cur_geo.y,
+                    Direction::Down => g.y >= cur_geo.y + cur_geo.h,
                 };
 
-                if is_in_dir {
-                    // 计算距离（勾股定理）
-                    let dist = (((center_x - cur_center_x).pow(2)
-                        + (center_y - cur_center_y).pow(2)) as f32)
-                        .sqrt();
-                    Some((w.id.clone(), dist))
-                } else {
-                    None
+                if !is_in_direction {
+                    return None;
                 }
+
+                // 计算投影重叠度（判定它们是否“对得齐”）
+                let overlap = match dir {
+                    Direction::Left | Direction::Right => {
+                        // 检查垂直方向是否有交叉
+                        let over = cur_geo.y.max(g.y) < (cur_geo.y + cur_geo.h).min(g.y + g.h);
+                        if over {
+                            1000
+                        } else {
+                            0
+                        } // 有重叠给予极高权重
+                    }
+                    Direction::Up | Direction::Down => {
+                        // 检查水平方向是否有交叉
+                        let over = cur_geo.x.max(g.x) < (cur_geo.x + cur_geo.w).min(g.x + g.w);
+                        if over {
+                            1000
+                        } else {
+                            0
+                        }
+                    }
+                };
+
+                // 计算边缘距离
+                let dist = match dir {
+                    Direction::Left => cur_geo.x - (g.x + g.w),
+                    Direction::Right => g.x - (cur_geo.x + cur_geo.w),
+                    Direction::Up => cur_geo.y - (g.y + g.h),
+                    Direction::Down => g.y - (cur_geo.y + cur_geo.h),
+                };
+
+                // 分数：重叠度越高、距离越近，分数越低（越优）
+                let score = dist - overlap;
+                Some((w.id.clone(), score))
             })
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by_key(|&(_, score)| score)
             .map(|(id, _)| id)
     }
 }
