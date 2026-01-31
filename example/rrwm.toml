@@ -7,6 +7,16 @@ options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
 model = "pc105" # 一般可选，默认 pc105
 
 [keybindings.alt]
+1 = { action = "focus", args = ["1"] }
+2 = { action = "focus", args = ["2"] }
+3 = { action = "focus", args = ["3"] }
+4 = { action = "focus", args = ["4"] }
+5 = { action = "focus", args = ["5"] }
+6 = { action = "focus", args = ["6"] }
+7 = { action = "focus", args = ["7"] }
+8 = { action = "focus", args = ["8"] }
+9 = { action = "focus", args = ["9"] }
+0 = { action = "focus", args = ["10"] }
 # 关闭聚焦窗口
 q = { action = "close_focused" }
 # 焦点切换：通过 args 指定方向
@@ -23,6 +33,20 @@ Return = { action = "spawn", args = ["ghostty"] }
 
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
+1 = { action = "move", args = ["1"] }
+2 = { action = "move", args = ["2"] }
+3 = { action = "move", args = ["3"] }
+4 = { action = "move", args = ["4"] }
+5 = { action = "move", args = ["5"] }
+6 = { action = "move", args = ["6"] }
+7 = { action = "move", args = ["7"] }
+8 = { action = "move", args = ["8"] }
+9 = { action = "move", args = ["9"] }
+0 = { action = "move", args = ["10"] }
+n = { action = "move", args = ["left"] }
+i = { action = "move", args = ["right"] }
+u = { action = "move", args = ["up"] }
+e = { action = "move", args = ["down"] }
 Return = { action = "spawn", args = ["alacritty"] }
 [keybindings."super+shift"]
 Space = { action = "spawn", args = ["wezterm"] }
@@ -33,7 +57,3 @@ F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
 [keybindings.none]
 F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
 
-# 工作区配置
-[workspaces]
-focus_mods = ["Super"]           # Super+1-9 切换工作区
-move_mods = ["Super", "Shift"]   # Super+Shift+1-9 移动窗口到工作区
