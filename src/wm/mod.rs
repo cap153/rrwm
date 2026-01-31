@@ -51,6 +51,8 @@ pub struct OutputData {
     pub width: i32,
     pub height: i32,
     pub usable_area: Geometry,
+    pub ls_output: Option<RiverLayerShellOutputV1>,
+    // pub raw_output: RiverOutputV1,
 }
 
 #[derive(Clone)]
@@ -100,6 +102,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                 "river_layer_shell_v1" => {
                     println!("[ID:{}] 绑定：层级表面管理器 (Waybar 权限已开启)", name);
                     let manager = proxy.bind::<RiverLayerShellV1, _, _>(name, 1, qh, ());
+
+                    // // 在存入 state 之前，先用这个 manager 给旧人补办手续
+                    // for out_data in state.outputs.values_mut() {
+                    //     if out_data.ls_output.is_none() {
+                    //         out_data.ls_output =
+                    //             Some(manager.get_output(&out_data.raw_output, qh, ()));
+                    //     }
+                    // }
+
                     state.layer_shell_manager = Some(manager);
                 }
                 "river_window_manager_v1" => {
@@ -264,6 +275,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
+                // --- 激活层级表面默认输出 ---
+                for out_data in state.outputs.values() {
+                    if let Some(ls_out) = &out_data.ls_output {
+                        // 在管理事务中正式宣布：这个显示器可以画 Waybar 和壁纸了！
+                        ls_out.set_default();
+                    }
+                }
                 for kb in &state.key_bindings {
                     kb.obj.enable();
                 }
@@ -301,12 +319,31 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
                 proxy.render_finish();
             }
+
             WmEvent::Output { id } => {
-                // 之前可能为空，现在要处理
+                println!("-> 发现新显示器，正在准备层级管理...");
+
+                let mut ls_out = None;
                 if let Some(ls_mgr) = &state.layer_shell_manager {
-                    // 为这个输出创建一个层级表面监听器
-                    ls_mgr.get_output(&id, qh, ());
+                    // 只调用一次！并保存这个对象
+                    ls_out = Some(ls_mgr.get_output(&id, qh, ()));
                 }
+
+                state.outputs.insert(
+                    id.id(),
+                    OutputData {
+                        width: 0, // 等待 Dimensions 事件填充
+                        height: 0,
+                        usable_area: Geometry {
+                            x: 0,
+                            y: 0,
+                            w: 0,
+                            h: 0,
+                        },
+                        ls_output: ls_out,
+                        // raw_output: id.clone(), // 存下这个“人”，以后补证用
+                    },
+                );
             }
             _ => {}
         }
@@ -331,20 +368,21 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
             println!("-> 分辨率更新: {}x{}", width, height);
             state.current_width = width;
             state.current_height = height;
-            // 修复点：提供完整的 OutputData 结构
-            state.outputs.insert(
-                proxy.id(),
-                OutputData {
-                    width,
-                    height,
-                    usable_area: Geometry {
+
+            // 找到现有的 OutputData 并更新它
+            if let Some(data) = state.outputs.get_mut(&proxy.id()) {
+                data.width = width;
+                data.height = height;
+                // 如果 usable_area 还没初始化，就先设为全屏
+                if data.usable_area.w == 0 {
+                    data.usable_area = Geometry {
                         x: 0,
                         y: 0,
                         w: width,
                         h: height,
-                    }, // 初始占满全屏
-                },
-            );
+                    };
+                }
+            }
         }
     }
 }
