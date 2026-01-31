@@ -2,6 +2,7 @@
 ---
 把文件按照功能性拆分开，比如wm.rs放目前的代码，接下来的binds.rs放快捷键。
 ---
+```bash
 rrwm
 ├── Cargo.toml
 ├── protocols/
@@ -14,9 +15,16 @@ rrwm
     │   ├── layout.rs    # 平铺引擎：LayoutNode 定义及递归计算算法
     │   └── actions.rs   # 动作执行：处理“切换焦点”、“关闭窗口”的具体代码
     └── binds.rs         # 绑定中心：将快捷键与 actions 关联起来
+```
 ---
 先实现快捷键焦点切换，最后考虑多显示器
 ---
 模态/和弦按键 (Chorded Bindings) 可以实现全局的vimium c吗
 ---
 日志信息自动识别中英文环境切换。
+---
+原定计划是有个`binds.rs         # 绑定中心：将快捷键与 actions 关联起来`现在写了一部分到`config.rs        # 配置定义：边框颜色、间隙大小、快捷键列表`
+---
+托盘图标
+---
+动态标签
