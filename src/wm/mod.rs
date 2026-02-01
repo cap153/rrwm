@@ -3,7 +3,9 @@ pub mod binds;
 pub mod layout;
 use self::actions::Action;
 use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
-use crate::protocol::river_input::river_input_device_v1::RiverInputDeviceV1;
+use crate::protocol::river_input::river_input_device_v1::{
+    Event as InputDeviceEvent, RiverInputDeviceV1,
+};
 use crate::protocol::river_input::river_input_manager_v1::RiverInputManagerV1;
 use crate::protocol::river_layer_shell::river_layer_shell_output_v1::{
     Event as LayerOutEvent, RiverLayerShellOutputV1,
@@ -84,6 +86,7 @@ pub struct AppState {
     pub keyboards: Vec<RiverXkbKeyboardV1>,
     pub current_keymap: Option<RiverXkbKeymapV1>,
     pub layer_shell_manager: Option<RiverLayerShellV1>,
+    pub device_names: HashMap<ObjectId, String>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -559,6 +562,8 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
 
 // --- 7. 键盘布局自动加载逻辑 ---
 
+// src/wm/mod.rs
+
 impl Dispatch<RiverXkbConfigV1, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -569,16 +574,16 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
         qh: &QueueHandle<Self>,
     ) {
         if let ConfigEvent::XkbKeyboard { id } = event {
-            // 1. 始终把新发现的键盘存入列表
+            // 1. 存入列表，等待后续验证身份
             state.keyboards.push(id.clone());
 
-            // 2. 优化：如果已经创建过 Keymap 对象了，就没必要再写临时文件了
+            // 2. 如果已经有缓存的键位图，什么都不做！
+            // 等待 KbEvent::InputDevice 事件触发时再去应用
             if state.current_keymap.is_some() {
-                // 后续在 KeymapEvent::Success 回调里会统一给 state.keyboards 里的所有设备设布局
                 return;
             }
 
-            // 3. 只有第一次才执行生成逻辑
+            // 3. 只有第一次才执行生成逻辑 (生成 temp_file 等)
             if let Some(kb_cfg) = state
                 .config
                 .input
@@ -610,7 +615,6 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
                     let _ = temp_file.write_all(keymap_str.as_bytes());
 
                     if let Some(mgr) = &state.xkb_config {
-                        // 4. 创建 River 端的 Keymap 对象并存入缓存
                         let river_keymap =
                             mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
                         state.current_keymap = Some(river_keymap);
@@ -684,26 +688,74 @@ impl Dispatch<RiverInputManagerV1, ()> for AppState {
     }
     wayland_client::event_created_child!(AppState, RiverInputManagerV1, [1 => (RiverInputDeviceV1, ())]);
 }
+// src/wm/mod.rs
+
 impl Dispatch<RiverInputDeviceV1, ()> for AppState {
     fn event(
-        _: &mut Self,
-        _: &RiverInputDeviceV1,
-        _: crate::protocol::river_input::river_input_device_v1::Event,
+        state: &mut Self,
+        proxy: &RiverInputDeviceV1,
+        event: InputDeviceEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        match event {
+            InputDeviceEvent::Name { name } => {
+                println!("-> 发现输入设备名称: ID {:?} = {}", proxy.id(), name);
+                state.device_names.insert(proxy.id(), name);
+            }
+            _ => {}
+        }
     }
 }
+// src/wm/mod.rs
+
 impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
     fn event(
-        _: &mut Self,
-        _: &RiverXkbKeyboardV1,
-        _: KbEvent,
+        state: &mut Self,
+        proxy: &RiverXkbKeyboardV1,
+        event: KbEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        match event {
+            KbEvent::InputDevice { device } => {
+                // 1. 查名字
+                let name = state
+                    .device_names
+                    .get(&device.id())
+                    .cloned()
+                    .unwrap_or_default();
+                let name_lower = name.to_lowercase();
+
+                // 2. 黑名单过滤：如果是虚拟键盘，直接忽略
+                if name_lower.contains("fcitx") || name_lower.contains("virtual") {
+                    println!("-> [忽略] 检测到虚拟键盘: {} (ID: {:?})", name, proxy.id());
+                    // 甚至可以从 state.keyboards 里把它删掉，免得以后误伤
+                    state.keyboards.retain(|k| k.id() != proxy.id());
+                    return;
+                }
+
+                println!(
+                    "-> [配置] 检测到物理键盘: {} (ID: {:?})，应用布局...",
+                    name,
+                    proxy.id()
+                );
+
+                // 3. 只有通过检查的，才应用布局
+                if let Some(keymap) = &state.current_keymap {
+                    proxy.set_keymap(keymap);
+                }
+            }
+
+            KbEvent::Removed => {
+                // 清理逻辑
+                let id = proxy.id();
+                state.keyboards.retain(|k| k.id() != id);
+            }
+            _ => {}
+        }
     }
 }
 impl Dispatch<RiverNodeV1, ()> for AppState {

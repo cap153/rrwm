@@ -34,6 +34,7 @@ fn main() {
         keyboards: Vec::new(),
         current_keymap: None,
         layer_shell_manager: None,
+        device_names: HashMap::new(), // 初始化哈希表
     };
 
     let _registry = display.get_registry(&qh, ());

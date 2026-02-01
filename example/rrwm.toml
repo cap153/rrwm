@@ -46,6 +46,7 @@ Return = { action = "spawn", args = ["ghostty"] }
 
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
+c = { action = "reload_configuration" }
 1 = { action = "move", args = ["1"] }
 2 = { action = "move", args = ["2"] }
 3 = { action = "move", args = ["3"] }
