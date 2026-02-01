@@ -114,6 +114,7 @@ pub struct AppState {
     pub ipc_clients: Vec<UnixStream>,
     pub output_manager: Option<ZwlrOutputManagerV1>,
     pub heads: Vec<HeadInfo>,
+    pub last_output_serial: u32,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -381,15 +382,15 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
             if let Some(data) = state.outputs.get_mut(&proxy.id()) {
                 data.width = width;
                 data.height = height;
-                // 如果 usable_area 还没初始化，就先设为全屏
-                if data.usable_area.w == 0 {
-                    data.usable_area = Geometry {
-                        x: 0,
-                        y: 0,
-                        w: width,
-                        h: height,
-                    };
-                }
+                data.usable_area = Geometry {
+                    x: 0,
+                    y: 0,
+                    w: width,
+                    h: height,
+                };
+            }
+            if let Some(wm) = &state.river_wm {
+                wm.manage_dirty();
             }
         }
     }
@@ -583,7 +584,15 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
     ) {
         if let BindingEvent::Pressed = event {
             if let Some(kb) = state.key_bindings.iter().find(|b| b.obj.id() == proxy.id()) {
-                state.perform_action(kb.action.clone());
+                // 先把动作拿出来存进变量
+                let action = kb.action.clone();
+                // 执行动作
+                state.perform_action(action.clone());
+                // 如果是重载动作，在这里补一发显示器申请
+                if let Action::ReloadConfiguration = action {
+                    let serial = state.last_output_serial;
+                    state.apply_output_configs(qh, serial);
+                }
             }
 
             // --- 核心重载逻辑 ---
@@ -741,10 +750,8 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for AppState {
                 });
             }
             MgrEvent::Done { serial } => {
-                println!(
-                    "-> 显示器硬件报告完毕 (Serial: {})，开始匹配配置...",
-                    serial
-                );
+                state.last_output_serial = serial; // 记住这个号，以后热重载要用
+                println!("-> 显示器硬件报告完毕 (Serial: {})", serial);
                 state.apply_output_configs(qh, serial);
             }
             _ => {}
@@ -822,7 +829,7 @@ impl Dispatch<ZwlrOutputModeV1, ()> for AppState {
 // 配置事务的 Dispatch (处理成功/失败的回执)
 impl Dispatch<ZwlrOutputConfigurationV1, ()> for AppState {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         _proxy: &ZwlrOutputConfigurationV1,
         event: ConfigResEvent,
         _: &(),
@@ -830,7 +837,13 @@ impl Dispatch<ZwlrOutputConfigurationV1, ()> for AppState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            ConfigResEvent::Succeeded => println!("-> [成功] 显示器配置已生效"),
+            ConfigResEvent::Succeeded => {
+                println!("-> [成功] 显示器配置已生效，正在刷新布局...");
+                // 强行触发一次 ManageStart，让 BSP 树重新计算
+                if let Some(wm) = &state.river_wm {
+                    wm.manage_dirty();
+                }
+            }
             ConfigResEvent::Failed => eprintln!("-> [失败] River 拒绝了该显示器配置"),
             ConfigResEvent::Cancelled => eprintln!("-> [取消] 配置由于硬件热插拔已失效，请重试"),
         }

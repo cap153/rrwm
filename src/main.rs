@@ -63,6 +63,7 @@ fn main() {
         ipc_clients: Vec::new(),
         output_manager: None,
         heads: Vec::new(),
+        last_output_serial: 0,
     };
 
     let _registry = display.get_registry(&qh, ());

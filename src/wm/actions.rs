@@ -1,4 +1,5 @@
 // src/wm/actions.rs
+use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
 use crate::wm::layout::{Direction, LayoutNode, SplitType}; // 修复点：引入布局相关的类型
 use crate::wm::AppState;
 use serde::Serialize;
@@ -110,83 +111,177 @@ impl AppState {
             None => return,
         };
 
-        // 1. 创建“配置事务”
         let config_obj = mgr.create_configuration(serial, qh, ());
 
-        println!("-> 正在处理显示器匹配逻辑...");
+        // 存储最终计算结果的结构
+        struct FinalConfig {
+            x: i32,
+            y: i32,
+            scale: f64,
+            transform: Transform,
+            mode: Option<ZwlrOutputModeV1>,
+        }
 
-        // 2. 准备物理接口列表
-        let heads_to_process: Vec<_> = self
-            .heads
-            .iter()
-            .map(|h| (h.obj.clone(), h.name.clone()))
-            .collect();
+        let mut calculated: std::collections::HashMap<String, FinalConfig> =
+            std::collections::HashMap::new();
+        let mut cursor_x = 0;
 
-        for (head_obj, head_name) in heads_to_process {
-            let cfg_opt = self.config.output.as_ref().and_then(|m| m.get(&head_name));
+        println!("-> 正在计算显示器布局...");
 
-            if let Some(cfg) = cfg_opt {
-                println!("-> [配置] 匹配到显示器: {}", head_name);
+        // --- 第一轮：处理所有“非镜像”的显示器 ---
+        for head in &self.heads {
+            let cfg = self.config.output.as_ref().and_then(|m| m.get(&head.name));
 
-                // 修正 1：添加 & 符号，传递引用
-                let head_config = config_obj.enable_head(&head_obj, qh, ());
+            // 如果 mirror 设为了某个名字，说明它是从属，第一轮先跳过
+            if let Some(m_target) = cfg.and_then(|c| c.mirror.as_ref()) {
+                if m_target != "false" {
+                    continue;
+                }
+            }
 
-                // --- A. 设置分辨率 ---
-                if let Some(mode_str) = &cfg.mode {
-                    if let Some((w, h, r_mhz)) = parse_mode_string(mode_str) {
-                        if let Some(head_info) = self.heads.iter().find(|h| h.name == head_name) {
-                            let target_mode = head_info.modes.iter().find(|m| {
-                                m.width == w && m.height == h && (r_mhz == 0 || m.refresh == r_mhz)
-                            });
+            // A. 确定缩放和模式（分辨率）
+            let scale = cfg
+                .and_then(|c| c.scale.as_ref())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let mut target_mode = None;
+            let mut phys_w = 1920;
 
-                            if let Some(m) = target_mode {
-                                head_config.set_mode(&m.obj);
-                            }
-                        }
+            if let Some(mode_str) = cfg.and_then(|c| c.mode.as_ref()) {
+                if let Some((w, h, r)) = Self::parse_mode_string(mode_str) {
+                    if let Some(m) = head
+                        .modes
+                        .iter()
+                        .find(|m| m.width == w && m.height == h && (r == 0 || m.refresh == r))
+                    {
+                        target_mode = Some(m.obj.clone());
+                        phys_w = m.width;
                     }
                 }
+            }
 
-                // --- B. 设置缩放 ---
-                if let Some(scale_str) = &cfg.scale {
-                    if let Ok(scale_f) = scale_str.parse::<f64>() {
-                        // 修正 2：直接传递 f64，不需要转换 i32 和乘以 256
-                        // 绑定库会自动处理协议层要求的定点数转换
-                        head_config.set_scale(scale_f);
-                    }
-                }
-
-                // --- C. 设置旋转 ---
-                if let Some(trans_str) = &cfg.transform {
-                    // 修正 3：使用 _90, _180, _270 这种带下划线的枚举名
-                    let t = match trans_str.as_str() {
-                        "90" => Transform::_90,
-                        "180" => Transform::_180,
-                        "270" => Transform::_270,
-                        "flipped" => Transform::Flipped,
-                        "flipped-90" => Transform::Flipped90,
-                        "flipped-180" => Transform::Flipped180,
-                        "flipped-270" => Transform::Flipped270,
-                        _ => Transform::Normal,
-                    };
-                    head_config.set_transform(t);
-                }
-
-                // --- D. 设置坐标位置 ---
-                if let Some(pos) = &cfg.position {
-                    let x = pos.x.parse().unwrap_or(0);
-                    let y = pos.y.parse().unwrap_or(0);
-                    head_config.set_position(x, y);
-                }
+            // B. 确定坐标
+            let (x, y) = if let Some(pos) = cfg.and_then(|c| c.position.as_ref()) {
+                (pos.x.parse().unwrap_or(0), pos.y.parse().unwrap_or(0))
             } else {
-                // 修正 4：同样添加 & 符号
-                config_obj.enable_head(&head_obj, qh, ());
+                let x = cursor_x;
+                (x, 0)
+            };
+
+            let log_w = (phys_w as f64 / scale).ceil() as i32;
+
+            calculated.insert(
+                head.name.clone(),
+                FinalConfig {
+                    x,
+                    y,
+                    scale,
+                    transform: Self::parse_transform(cfg),
+                    mode: target_mode,
+                },
+            );
+
+            // 关键：非镜像显示器会推动游标，防止下一个显示器重叠
+            cursor_x = x + log_w;
+            println!(
+                "   [独立] {} 放置于 {},{} (逻辑宽度: {})",
+                head.name, x, y, log_w
+            );
+        }
+
+        // --- 第二轮：处理“镜像”显示器 ---
+        for head in &self.heads {
+            if calculated.contains_key(&head.name) {
+                continue;
+            }
+
+            let cfg = self.config.output.as_ref().and_then(|m| m.get(&head.name));
+            if let Some(m_target) = cfg.and_then(|c| c.mirror.as_ref()) {
+                // 查找目标的坐标
+                if let Some(target_cfg) = calculated.get(m_target) {
+                    let tx = target_cfg.x;
+                    let ty = target_cfg.y;
+
+                    let scale = cfg
+                        .and_then(|c| c.scale.as_ref())
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(1.0);
+
+                    calculated.insert(
+                        head.name.clone(),
+                        FinalConfig {
+                            x: tx,
+                            y: ty,
+                            scale,
+                            transform: Self::parse_transform(cfg),
+                            mode: None, // 镜像通常跟随目标模式，这里可以设为 None 让系统选
+                        },
+                    );
+                    println!(
+                        "   [镜像] {} 复制坐标自 {} -> {},{}",
+                        head.name, m_target, tx, ty
+                    );
+                }
             }
         }
 
-        // 4. 提交
+        // --- 第三轮：向 River 提交 ---
+        for head in &self.heads {
+            let head_config = config_obj.enable_head(&head.obj, qh, ());
+            if let Some(res) = calculated.get(&head.name) {
+                head_config.set_position(res.x, res.y);
+                head_config.set_scale(res.scale);
+                head_config.set_transform(res.transform);
+                if let Some(m) = &res.mode {
+                    head_config.set_mode(m);
+                }
+            } else {
+                // 保底：没配的也排在最右边
+                head_config.set_position(cursor_x, 0);
+                cursor_x += 1920;
+            }
+        }
+
         config_obj.apply();
-        println!("-> 显示器配置事务已提交");
     }
+
+    /// 辅助：解析 "3840x2160@60.000"
+    fn parse_mode_string(s: &str) -> Option<(i32, i32, i32)> {
+        let parts: Vec<&str> = s.split('@').collect();
+        let res: Vec<&str> = parts[0].split('x').collect();
+        if res.len() != 2 {
+            return None;
+        }
+
+        let w = res[0].trim().parse().ok()?;
+        let h = res[1].trim().parse().ok()?;
+
+        let r_mhz = if parts.len() > 1 {
+            (parts[1].trim().parse::<f32>().ok().unwrap_or(60.0) * 1000.0) as i32
+        } else {
+            0
+        };
+        Some((w, h, r_mhz))
+    }
+
+    /// 辅助：解析旋转字符串
+    fn parse_transform(cfg: Option<&crate::config::OutputConfig>) -> Transform {
+        if let Some(trans_str) = cfg.and_then(|c| c.transform.as_ref()) {
+            match trans_str.as_str() {
+                "90" => Transform::_90,
+                "180" => Transform::_180,
+                "270" => Transform::_270,
+                "flipped" => Transform::Flipped,
+                "flipped-90" => Transform::Flipped90,
+                "flipped-180" => Transform::Flipped180,
+                "flipped-270" => Transform::Flipped270,
+                _ => Transform::Normal,
+            }
+        } else {
+            Transform::Normal
+        }
+    }
+
     pub fn perform_action(&mut self, action: Action) {
         match action {
             Action::ReloadConfiguration => {
@@ -631,26 +726,4 @@ impl AppState {
             .min_by_key(|&(_, score)| score)
             .map(|(id, _)| id)
     }
-}
-
-/// 辅助：解析 "3840x2160@60.000"
-/// 返回 (宽, 高, 刷新率_mHz)
-fn parse_mode_string(s: &str) -> Option<(i32, i32, i32)> {
-    let parts: Vec<&str> = s.split('@').collect();
-    let res: Vec<&str> = parts[0].split('x').collect();
-    if res.len() != 2 {
-        return None;
-    }
-
-    let w = res[0].trim().parse().ok()?;
-    let h = res[1].trim().parse().ok()?;
-
-    // 协议要求 refresh 是 mHz (毫赫兹)，比如 60Hz 对应 60000mHz
-    let r_mhz = if parts.len() > 1 {
-        (parts[1].trim().parse::<f32>().ok()? * 1000.0) as i32
-    } else {
-        0 // 0 表示让系统选最高的
-    };
-
-    Some((w, h, r_mhz))
 }
