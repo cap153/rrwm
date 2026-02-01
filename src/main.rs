@@ -16,6 +16,7 @@ fn main() {
 
     let mut state = AppState {
         config: config,
+        needs_reload: false,
         river_wm: None,
         windows: Vec::new(),
         outputs: HashMap::new(),

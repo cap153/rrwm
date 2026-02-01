@@ -6,10 +6,11 @@ use crate::wm::AppState;
 pub enum Action {
     CloseFocused,
     Focus(Direction),
-    FocusTag(u32),      // 切换到某个标签掩码
-    MoveToTag(u32),     // 将窗口移动到某个标签掩码
-    Spawn(Vec<String>), // 纯净启动：[程序名, 参数1, 参数2]
-    Shell(String),      // Shell 启动：一整串命令字符串
+    FocusTag(u32),       // 切换到某个标签掩码
+    MoveToTag(u32),      // 将窗口移动到某个标签掩码
+    Spawn(Vec<String>),  // 纯净启动：[程序名, 参数1, 参数2]
+    Shell(String),       // Shell 启动：一整串命令字符串
+    ReloadConfiguration, // 重载配置
 }
 
 impl Action {
@@ -18,7 +19,8 @@ impl Action {
         match name.to_lowercase().as_str() {
             // --- 内部指令：关闭窗口 ---
             "close_window" | "close_focused" => Action::CloseFocused,
-
+            // --- 内部指令：重载配置 ---
+            "reload_configuration" => Action::ReloadConfiguration,
             // --- 内部指令：焦点切换 ---
             "focus" => {
                 let arg = args
@@ -79,6 +81,13 @@ impl Action {
 impl AppState {
     pub fn perform_action(&mut self, action: Action) {
         match action {
+            Action::ReloadConfiguration => {
+                println!("-> 正在手动重载配置...");
+                self.config = crate::config::Config::load();
+                self.needs_reload = true;
+                self.current_keymap = None;
+                println!("-> 配置已重载，新的布局将在下次键盘接入或手动触发时生效");
+            }
             // --- 标签切换逻辑 ---
             Action::FocusTag(mask) => {
                 println!("-> 切换标签掩码为: {:b}", mask);
@@ -137,9 +146,9 @@ impl AppState {
                 // 3. 如果没有在本页跳转成功（可能是没邻居，也可能是根本没窗口）
                 if !moved_locally {
                     match dir {
-                        Direction::Right => self.cycle_tag(1),  // 向右切到下一个标签
-                        Direction::Left  => self.cycle_tag(-1), // 向左切到上一个标签
-                        _ => {} // 上下方向通常不跨标签
+                        Direction::Right => self.cycle_tag(1), // 向右切到下一个标签
+                        Direction::Left => self.cycle_tag(-1), // 向左切到上一个标签
+                        _ => {}                                // 上下方向通常不跨标签
                     }
                 }
             }

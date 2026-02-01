@@ -68,6 +68,7 @@ pub struct WindowData {
 
 pub struct AppState {
     pub config: crate::config::Config,
+    pub needs_reload: bool,
     pub river_wm: Option<RiverWindowManagerV1>,
     pub windows: Vec<WindowData>,
     pub outputs: HashMap<ObjectId, OutputData>,
@@ -550,20 +551,36 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
         event: BindingEvent,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         if let BindingEvent::Pressed = event {
             if let Some(kb) = state.key_bindings.iter().find(|b| b.obj.id() == proxy.id()) {
                 state.perform_action(kb.action.clone());
+            }
+
+            // --- 核心重载逻辑 ---
+            if state.needs_reload {
+                println!("-> 执行快捷键热重载...");
+                // 1. 销毁旧对象：告诉 River 别再监听这些按键了
+                // drain(..) 会清空数组并返回里面的元素
+                for kb in state.key_bindings.drain(..) {
+                    kb.obj.destroy();
+                }
+                // 2. 创建新对象：根据新 config 重新注册
+                self::binds::setup_keybindings(state, qh);
+                // 3. 强制通知：由于新绑定的 enable() 必须在 manage 序列执行
+                // 我们调用 manage_dirty() 强行让 River 发起一次 ManageStart
+                if let Some(wm) = &state.river_wm {
+                    wm.manage_dirty();
+                }
+                state.needs_reload = false;
+                println!("-> 热重载完成！");
             }
         }
     }
 }
 
 // --- 7. 键盘布局自动加载逻辑 ---
-
-// src/wm/mod.rs
-
 impl Dispatch<RiverXkbConfigV1, ()> for AppState {
     fn event(
         state: &mut Self,

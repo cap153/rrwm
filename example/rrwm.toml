@@ -30,6 +30,7 @@ e = { action = "focus", args = ["down"] }
 Return = { action = "spawn", args = ["kitty"] }
 x = { action="spawn", args=["chromium", "--proxy-server=http://127.0.0.1:7897", "https://aistudio.google.com"] }
 j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | /usr/bin/satty --filename -' }
+a = { action="spawn", args=["/usr/bin/fuzzel", "toggle"] }
 
 [keybindings.super]
 1 = { action = "focus", args = ["1"] }
