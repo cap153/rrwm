@@ -39,6 +39,10 @@ fn main() {
     println!("rrwm 已启动，正在监听事件...");
 
     loop {
-        event_queue.blocking_dispatch(&mut state).unwrap();
+        if let Err(e) = event_queue.blocking_dispatch(&mut state) {
+            eprintln!("Wayland 连接发生致命错误: {:?}", e);
+            // 可以在这里打印更详细的 state 信息
+            break;
+        }
     }
 }

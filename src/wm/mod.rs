@@ -61,6 +61,7 @@ pub struct WindowData {
     pub window: RiverWindowV1,
     pub node: Option<RiverNodeV1>,
     pub tags: u32,
+    pub app_id: Option<String>,
 }
 
 pub struct AppState {
@@ -161,6 +162,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     window: id.clone(),
                     node: None,
                     tags: state.focused_tags, // 分配到当前活跃标签
+                    app_id: None,
                 };
                 state.windows.push(new_data.clone());
 
@@ -464,6 +466,31 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 state.last_geometry.remove(&id);
 
                 // 此时不需要做任何事，River 随后会自动发 ManageStart
+            }
+            WinEvent::AppId { app_id } => {
+                println!("-> 窗口 ID {:?} 的 AppId 是: {:?}", proxy.id(), app_id);
+                // 更新列表里的 app_id
+                if let Some(w_info) = state.windows.iter_mut().find(|w| w.id == proxy.id()) {
+                    w_info.app_id = app_id.clone();
+                }
+
+                // --- 核心逻辑：如果是 fcitx，将其从布局树中踢出去 ---
+                if let Some(id_str) = app_id {
+                    if id_str.contains("fcitx") {
+                        // 1. 从当前的布局树中移除它
+                        if let Some(root) = state.layout_roots.remove(&state.focused_tags) {
+                            state.layout_roots.insert(
+                                state.focused_tags,
+                                LayoutNode::remove_at(root, &proxy.id()).unwrap_or_else(|| {
+                                    // 如果删掉后树空了，这里逻辑要处理
+                                    // 我们稍后完善 layout_roots 的删除
+                                    panic!("不要在这里 panic，需要优雅处理空树");
+                                }),
+                            );
+                        }
+                        println!("-> 检测到输入法窗口，已从平铺逻辑中排除");
+                    }
+                }
             }
             _ => {}
         }
