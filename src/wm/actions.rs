@@ -3,6 +3,12 @@ use crate::wm::layout::{Direction, LayoutNode, SplitType}; // 修复点：引入
 use crate::wm::AppState;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 
+#[derive(PartialEq)]
+enum MoveHint {
+    Leftmost,  // 强制出现在最左边
+    Rightmost, // 强制出现在最右边
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     CloseFocused,
@@ -95,29 +101,17 @@ impl AppState {
                 // 注意：修改 state 后，River 随后会自动触发 ManageStart 重新渲染
             }
 
-            // --- 移动窗口到标签逻辑 ---
+            // --- 编号移动 (Super+Shift+数字) ---
             Action::MoveToTag(target_mask) => {
                 if let Some(f_id) = self.focused_window.clone() {
-                    self.move_window_to_tag(&f_id, target_mask, true); // true 表示跟随
+                    // 固定出现在左边
+                    self.move_window_to_tag(&f_id, target_mask, true, MoveHint::Leftmost);
                 }
             }
-
             // --- 方向性移动 (Super+Shift+n/i/u/e) ---
             Action::Move(dir) => {
                 if let Some(f_id) = self.focused_window.clone() {
-                    // 尝试在本地寻找邻居进行“换位”或“搬迁”
-                    if let Some(_neighbor_id) = self.find_neighbor(&f_id, dir) {
-                        // 本地移动逻辑：在 BSP 树中，这通常意味着移除并重新插入到邻居位置
-                        // 为了保持 Cosmic 风格简洁，我们暂时采用：移除 -> 在邻居方向重新插入
-                        self.move_window_locally(&f_id, dir);
-                    } else {
-                        // 边界情况：跨标签流转
-                        match dir {
-                            Direction::Right => self.move_window_relative(&f_id, 1),
-                            Direction::Left => self.move_window_relative(&f_id, -1),
-                            _ => {}
-                        }
-                    }
+                    self.move_window_locally(&f_id, dir);
                 }
             }
             // 直接启动逻辑：更轻量，无 Shell 开销
@@ -178,78 +172,88 @@ impl AppState {
         }
     }
 
-    fn move_window_to_tag(&mut self, win_id: &ObjectId, target_mask: u32, follow: bool) {
+    /// 核心：搬迁窗口至新 Tag 的指定边缘
+    fn move_window_to_tag(
+        &mut self,
+        win_id: &ObjectId,
+        target_mask: u32,
+        follow: bool,
+        hint: MoveHint,
+    ) {
         let old_tag = match self.windows.iter().find(|w| &w.id == win_id) {
             Some(w) => w.tags,
             None => return,
         };
-
         if old_tag == target_mask {
             return;
         }
 
-        // --- 在迁出前，更新旧标签的焦点记忆 ---
+        // 1. 接班人逻辑：如果焦点走了，给旧标签指派新领袖
         if self.tag_focus_history.get(&old_tag) == Some(win_id) {
-            // 在旧标签里找一个“留守”的窗口作为新领袖
             let replacement = self
                 .windows
                 .iter()
                 .find(|w| &w.id != win_id && (w.tags & old_tag) != 0)
                 .map(|w| w.id.clone());
-
-            if let Some(new_id) = replacement {
-                self.tag_focus_history.insert(old_tag, new_id);
+            if let Some(rid) = replacement {
+                self.tag_focus_history.insert(old_tag, rid);
             } else {
-                // 如果旧标签搬空了，就删掉记录
                 self.tag_focus_history.remove(&old_tag);
             }
         }
 
-        // 1. 从旧树中彻底移除
+        // 2. 从旧树中移除
         if let Some(root) = self.layout_roots.remove(&old_tag) {
             if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
                 self.layout_roots.insert(old_tag, new_root);
             }
         }
-        // 2. 更新窗口数据的标签
+
+        // 3. 更新窗口数据副本
         let mut win_data_opt = None;
         if let Some(w_info) = self.windows.iter_mut().find(|w| &w.id == win_id) {
             w_info.tags = target_mask;
             win_data_opt = Some(w_info.clone());
         }
 
-        // 3. 插入到新树中
+        // 4. 插入新树：这种插入方式非常简单高效，直接包裹旧树
         if let Some(w_data) = win_data_opt {
-            if let Some(mut root) = self.layout_roots.remove(&target_mask) {
-                // 找到新标签页的焦点窗口进行切割插入
-                let target_in_new = self
-                    .tag_focus_history
-                    .get(&target_mask)
-                    .cloned()
-                    .unwrap_or_else(|| w_data.id.clone());
-
-                // 默认垂直切分（左右）
-                root.insert_at(&target_in_new, w_data, SplitType::Vertical);
-                self.layout_roots.insert(target_mask, root);
+            if let Some(old_root) = self.layout_roots.remove(&target_mask) {
+                let new_root = match hint {
+                    MoveHint::Leftmost => LayoutNode::Container {
+                        split_type: SplitType::Vertical,
+                        ratio: 0.5,
+                        left_child: Box::new(LayoutNode::Window(w_data)),
+                        right_child: Box::new(old_root),
+                    },
+                    MoveHint::Rightmost => LayoutNode::Container {
+                        split_type: SplitType::Vertical,
+                        ratio: 0.5,
+                        left_child: Box::new(old_root),
+                        right_child: Box::new(LayoutNode::Window(w_data)),
+                    },
+                };
+                self.layout_roots.insert(target_mask, new_root);
             } else {
-                // 如果目标标签是空的，直接设为根
+                // 目标 Tag 是空的，直接做根节点
                 self.layout_roots
                     .insert(target_mask, LayoutNode::Window(w_data));
             }
         }
 
-        // 4. 更新焦点记忆
+        // 5. 状态同步
         self.tag_focus_history.insert(target_mask, win_id.clone());
-
-        // 5. 如果需要跟随（bspwm 风格）
         if follow {
             self.focused_tags = target_mask;
             self.focused_window = Some(win_id.clone());
         }
+        if let Some(wm) = &self.river_wm {
+            wm.manage_dirty();
+        }
     }
 
     /// 相对标签移动（向左/向右一个 Tag）
-    fn move_window_relative(&mut self, win_id: &ObjectId, delta: i32) {
+    fn move_window_relative(&mut self, win_id: &ObjectId, delta: i32, hint: MoveHint) {
         let mut current_idx = 0;
         for i in 0..9 {
             if (self.focused_tags & (1 << i)) != 0 {
@@ -259,7 +263,7 @@ impl AppState {
         }
         let next_idx = (current_idx + delta).rem_euclid(9) as u32;
         let next_mask = 1 << next_idx;
-        self.move_window_to_tag(win_id, next_mask, true);
+        self.move_window_to_tag(win_id, next_mask, true, hint);
     }
 
     /// 本地移动：在同一 Tag 内重新排列
@@ -281,11 +285,11 @@ impl AppState {
             match dir {
                 Direction::Left => {
                     println!("-> 左边界已达，跨标签移动至上一个 Tag");
-                    self.move_window_relative(win_id, -1);
+                    self.move_window_relative(win_id, -1, MoveHint::Rightmost);
                 }
                 Direction::Right => {
                     println!("-> 右边界已达，跨标签移动至下一个 Tag");
-                    self.move_window_relative(win_id, 1);
+                    self.move_window_relative(win_id, 1, MoveHint::Leftmost);
                 }
                 _ => {
                     println!("-> 上下边界已达，暂不处理跨标签");
