@@ -4,6 +4,8 @@ use crate::wm::AppState;
 use serde::Serialize;
 use std::io::Write;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
+use wayland_client::protocol::wl_output::Transform; // 旋转枚举
+use wayland_client::QueueHandle;
 
 // 定义发送给 Bar 的状态数据包
 #[derive(Serialize, Clone)]
@@ -102,6 +104,89 @@ impl Action {
     }
 }
 impl AppState {
+    pub fn apply_output_configs(&mut self, qh: &QueueHandle<Self>, serial: u32) {
+        let mgr = match &self.output_manager {
+            Some(m) => m,
+            None => return,
+        };
+
+        // 1. 创建“配置事务”
+        let config_obj = mgr.create_configuration(serial, qh, ());
+
+        println!("-> 正在处理显示器匹配逻辑...");
+
+        // 2. 准备物理接口列表
+        let heads_to_process: Vec<_> = self
+            .heads
+            .iter()
+            .map(|h| (h.obj.clone(), h.name.clone()))
+            .collect();
+
+        for (head_obj, head_name) in heads_to_process {
+            let cfg_opt = self.config.output.as_ref().and_then(|m| m.get(&head_name));
+
+            if let Some(cfg) = cfg_opt {
+                println!("-> [配置] 匹配到显示器: {}", head_name);
+
+                // 修正 1：添加 & 符号，传递引用
+                let head_config = config_obj.enable_head(&head_obj, qh, ());
+
+                // --- A. 设置分辨率 ---
+                if let Some(mode_str) = &cfg.mode {
+                    if let Some((w, h, r_mhz)) = parse_mode_string(mode_str) {
+                        if let Some(head_info) = self.heads.iter().find(|h| h.name == head_name) {
+                            let target_mode = head_info.modes.iter().find(|m| {
+                                m.width == w && m.height == h && (r_mhz == 0 || m.refresh == r_mhz)
+                            });
+
+                            if let Some(m) = target_mode {
+                                head_config.set_mode(&m.obj);
+                            }
+                        }
+                    }
+                }
+
+                // --- B. 设置缩放 ---
+                if let Some(scale_str) = &cfg.scale {
+                    if let Ok(scale_f) = scale_str.parse::<f64>() {
+                        // 修正 2：直接传递 f64，不需要转换 i32 和乘以 256
+                        // 绑定库会自动处理协议层要求的定点数转换
+                        head_config.set_scale(scale_f);
+                    }
+                }
+
+                // --- C. 设置旋转 ---
+                if let Some(trans_str) = &cfg.transform {
+                    // 修正 3：使用 _90, _180, _270 这种带下划线的枚举名
+                    let t = match trans_str.as_str() {
+                        "90" => Transform::_90,
+                        "180" => Transform::_180,
+                        "270" => Transform::_270,
+                        "flipped" => Transform::Flipped,
+                        "flipped-90" => Transform::Flipped90,
+                        "flipped-180" => Transform::Flipped180,
+                        "flipped-270" => Transform::Flipped270,
+                        _ => Transform::Normal,
+                    };
+                    head_config.set_transform(t);
+                }
+
+                // --- D. 设置坐标位置 ---
+                if let Some(pos) = &cfg.position {
+                    let x = pos.x.parse().unwrap_or(0);
+                    let y = pos.y.parse().unwrap_or(0);
+                    head_config.set_position(x, y);
+                }
+            } else {
+                // 修正 4：同样添加 & 符号
+                config_obj.enable_head(&head_obj, qh, ());
+            }
+        }
+
+        // 4. 提交
+        config_obj.apply();
+        println!("-> 显示器配置事务已提交");
+    }
     pub fn perform_action(&mut self, action: Action) {
         match action {
             Action::ReloadConfiguration => {
@@ -439,7 +524,7 @@ impl AppState {
 
         // 2. 计算动态边界 (Dynamic Boundary)
         let occupied = self.get_occupied_tags();
-        
+
         // 找到最高位的 1 在哪里。如果没有窗口，max_occupied_idx 设为 0 (Tag 1)
         // 32 - leading_zeros - 1 得到最高位的索引
         let max_occupied_idx = if occupied == 0 {
@@ -457,7 +542,7 @@ impl AppState {
             // --- 向右移动 ---
             if current_idx >= bound_idx {
                 // 如果当前已经在边界（或者意外超出了边界），回到 Tag 1
-                0 
+                0
             } else {
                 // 否则正常向右
                 current_idx + 1
@@ -477,7 +562,11 @@ impl AppState {
 
         // 仅当 Tag 真正改变时才执行操作，避免日志刷屏
         if next_mask != self.focused_tags {
-            println!("-> 动态流转: Tag {} -> Tag {}", current_idx + 1, next_idx + 1);
+            println!(
+                "-> 动态流转: Tag {} -> Tag {}",
+                current_idx + 1,
+                next_idx + 1
+            );
             self.focused_tags = next_mask;
             // River 会在下一帧自动感知 focused_tags 变化并发起 ManageStart
         }
@@ -542,4 +631,26 @@ impl AppState {
             .min_by_key(|&(_, score)| score)
             .map(|(id, _)| id)
     }
+}
+
+/// 辅助：解析 "3840x2160@60.000"
+/// 返回 (宽, 高, 刷新率_mHz)
+fn parse_mode_string(s: &str) -> Option<(i32, i32, i32)> {
+    let parts: Vec<&str> = s.split('@').collect();
+    let res: Vec<&str> = parts[0].split('x').collect();
+    if res.len() != 2 {
+        return None;
+    }
+
+    let w = res[0].trim().parse().ok()?;
+    let h = res[1].trim().parse().ok()?;
+
+    // 协议要求 refresh 是 mHz (毫赫兹)，比如 60Hz 对应 60000mHz
+    let r_mhz = if parts.len() > 1 {
+        (parts[1].trim().parse::<f32>().ok()? * 1000.0) as i32
+    } else {
+        0 // 0 表示让系统选最高的
+    };
+
+    Some((w, h, r_mhz))
 }

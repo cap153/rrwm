@@ -34,6 +34,13 @@ use crate::protocol::river_xkb_config::river_xkb_keyboard_v1::{
 use crate::protocol::river_xkb_config::river_xkb_keymap_v1::{
     Event as KeymapEvent, RiverXkbKeymapV1,
 };
+use crate::protocol::wlr_output_management::{
+    zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
+    zwlr_output_configuration_v1::{Event as ConfigResEvent, ZwlrOutputConfigurationV1},
+    zwlr_output_head_v1::{Event as HeadEvent, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
+};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
@@ -48,7 +55,6 @@ pub struct KeyBinding {
     pub obj: RiverXkbBindingV1,
     pub action: Action,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct OutputData {
@@ -66,6 +72,20 @@ pub struct WindowData {
     pub node: Option<RiverNodeV1>,
     pub tags: u32,
     pub app_id: Option<String>,
+}
+
+pub struct ModeInfo {
+    pub obj: ZwlrOutputModeV1,
+    pub width: i32,
+    pub height: i32,
+    pub refresh: i32,
+}
+
+pub struct HeadInfo {
+    pub obj: ZwlrOutputHeadV1,
+    pub name: String,
+    pub modes: Vec<ModeInfo>,
+    pub current_mode: Option<ObjectId>, // 记录当前生效的是哪个模式
 }
 
 pub struct AppState {
@@ -92,6 +112,8 @@ pub struct AppState {
     pub device_names: HashMap<ObjectId, String>,
     pub ipc_listener: Option<UnixListener>,
     pub ipc_clients: Vec<UnixStream>,
+    pub output_manager: Option<ZwlrOutputManagerV1>,
+    pub heads: Vec<HeadInfo>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -109,18 +131,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
         } = event
         {
             match interface.as_str() {
+                "zwlr_output_manager_v1" => {
+                    println!("[ID:{}] 发现显示器管理器 (wlr-output-management)", name);
+                    let manager = proxy.bind::<ZwlrOutputManagerV1, _, _>(name, 4, qh, ());
+                    state.output_manager = Some(manager);
+                }
                 "river_layer_shell_v1" => {
                     println!("[ID:{}] 绑定：层级表面管理器 (Waybar 权限已开启)", name);
                     let manager = proxy.bind::<RiverLayerShellV1, _, _>(name, 1, qh, ());
-
-                    // // 在存入 state 之前，先用这个 manager 给旧人补办手续
-                    // for out_data in state.outputs.values_mut() {
-                    //     if out_data.ls_output.is_none() {
-                    //         out_data.ls_output =
-                    //             Some(manager.get_output(&out_data.raw_output, qh, ()));
-                    //     }
-                    // }
-
                     state.layer_shell_manager = Some(manager);
                 }
                 "river_window_manager_v1" => {
@@ -702,20 +720,122 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
     }
 }
 
-// --- 8. 空实现 ---
-impl Dispatch<RiverInputManagerV1, ()> for AppState {
+// --- A. 经理 Dispatch：负责发现“接口(Head)”和处理“报告完毕(Done)” ---
+impl Dispatch<ZwlrOutputManagerV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwlrOutputManagerV1,
+        event: MgrEvent,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            MgrEvent::Head { head } => {
+                // 发现新接口，先存起来，后续通过事件填内容
+                state.heads.push(HeadInfo {
+                    obj: head,
+                    name: String::new(),
+                    modes: Vec::new(),
+                    current_mode: None,
+                });
+            }
+            MgrEvent::Done { serial } => {
+                println!(
+                    "-> 显示器硬件报告完毕 (Serial: {})，开始匹配配置...",
+                    serial
+                );
+                state.apply_output_configs(qh, serial);
+            }
+            _ => {}
+        }
+    }
+    wayland_client::event_created_child!(AppState, ZwlrOutputManagerV1, [
+        0 => (ZwlrOutputHeadV1, ())
+    ]);
+}
+
+// --- B. 接口 Dispatch：负责收集名字、当前模式、支持的分辨率列表 ---
+impl Dispatch<ZwlrOutputHeadV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrOutputHeadV1,
+        event: HeadEvent,
+        _: &(),
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let Some(head) = state.heads.iter_mut().find(|h| h.obj.id() == proxy.id()) {
+            match event {
+                HeadEvent::Name { name } => head.name = name,
+                HeadEvent::CurrentMode { mode } => head.current_mode = Some(mode.id()),
+                HeadEvent::Mode { mode } => {
+                    head.modes.push(ModeInfo {
+                        obj: mode,
+                        width: 0,
+                        height: 0,
+                        refresh: 0,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    wayland_client::event_created_child!(AppState, ZwlrOutputHeadV1, [
+        3 => (ZwlrOutputModeV1, ())
+    ]);
+}
+
+// --- C. 模式 Dispatch：负责记录分辨率和刷新率 ---
+impl Dispatch<ZwlrOutputModeV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrOutputModeV1,
+        event: ModeEvent,
+        _: &(),
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // 找到属于哪个 Head，并存入其模式列表
+        for head in &mut state.heads {
+            if let Some(mode_info) = head.modes.iter_mut().find(|m| m.obj.id() == proxy.id()) {
+                match event {
+                    ModeEvent::Size { width, height } => {
+                        mode_info.width = width;
+                        mode_info.height = height;
+                    }
+                    ModeEvent::Refresh { refresh } => {
+                        mode_info.refresh = refresh;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+        }
+
+        // 如果是第一次见到的模式对象，根据 XML 协议，mode 对象是在 Head 接口下创建的
+        // 这里简化处理：因为 generate_client_code 已经帮我们处理了层级
+        // 我们在 HeadEvent::Mode 里预创建 ModeInfo 会更优雅。
+    }
+}
+
+// 配置事务的 Dispatch (处理成功/失败的回执)
+impl Dispatch<ZwlrOutputConfigurationV1, ()> for AppState {
     fn event(
         _: &mut Self,
-        _: &RiverInputManagerV1,
-        _: crate::protocol::river_input::river_input_manager_v1::Event,
+        _proxy: &ZwlrOutputConfigurationV1,
+        event: ConfigResEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        match event {
+            ConfigResEvent::Succeeded => println!("-> [成功] 显示器配置已生效"),
+            ConfigResEvent::Failed => eprintln!("-> [失败] River 拒绝了该显示器配置"),
+            ConfigResEvent::Cancelled => eprintln!("-> [取消] 配置由于硬件热插拔已失效，请重试"),
+        }
     }
-    wayland_client::event_created_child!(AppState, RiverInputManagerV1, [1 => (RiverInputDeviceV1, ())]);
 }
-// src/wm/mod.rs
 
 impl Dispatch<RiverInputDeviceV1, ()> for AppState {
     fn event(
@@ -785,6 +905,20 @@ impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
         }
     }
 }
+// --- 8. 空实现 ---
+impl Dispatch<RiverInputManagerV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &RiverInputManagerV1,
+        _: crate::protocol::river_input::river_input_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+    wayland_client::event_created_child!(AppState, RiverInputManagerV1, [1 => (RiverInputDeviceV1, ())]);
+}
+// src/wm/mod.rs
 impl Dispatch<RiverNodeV1, ()> for AppState {
     fn event(
         _: &mut Self,
@@ -816,6 +950,19 @@ impl Dispatch<RiverLayerShellSeatV1, ()> for AppState {
         _: &mut Self,
         _: &RiverLayerShellSeatV1,
         _: LayerSeatEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// 配置子表单的 Dispatch (通常不需要处理事件)
+impl Dispatch<ZwlrOutputConfigurationHeadV1, ()> for AppState {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrOutputConfigurationHeadV1,
+        _: crate::protocol::wlr_output_management::zwlr_output_configuration_head_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,

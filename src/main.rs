@@ -61,6 +61,8 @@ fn main() {
         device_names: HashMap::new(), // 初始化哈希表
         ipc_listener: Some(listener),
         ipc_clients: Vec::new(),
+        output_manager: None,
+        heads: Vec::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

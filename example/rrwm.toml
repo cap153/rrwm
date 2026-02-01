@@ -7,7 +7,7 @@ variant = "colemak"
 model = "pc105" # 一般可选，默认 pc105
 
 [appearance]
-tag_icons = ["",  "", "", "", "", ""]
+tag_icons = ["",  "", "", "", "",  ]
 
 [keybindings.alt]
 # 关闭聚焦窗口
@@ -83,7 +83,7 @@ i = { action = "focus", args = ["right_output"] }
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
-[output.HDMI-A-2]
+[output.HDMI-A-1]
 focus-at-startup = "true" # 默认聚焦在这个显示器，如果多个显示器写了这个配置，写在前面的优先级更高
 mode = "3840x2160@60.000" # 格式为"<width>x<height>" 或者 "<width>x<height>@<refresh rate>"，如果省略了刷新率，默认选择最高的刷新率。
 scale = "2" # 允许使用整数或分数量表，例如，比例为150％或者1.25。

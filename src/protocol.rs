@@ -74,3 +74,18 @@ pub mod river_layer_shell {
     use self::__interfaces::*;
     wayland_scanner::generate_client_code!("./protocols/river-layer-shell-v1.xml");
 }
+
+// 6. 显示器硬件管理协议 (wlr-output-management)
+pub mod wlr_output_management {
+    pub extern crate wayland_backend;
+    pub extern crate wayland_client;
+    // 引入它依赖的标准输出接口，因为配置显示器时会用到旋转方向 (wl_output.transform)
+    pub use wayland_client::protocol::wl_output;
+
+    pub mod __interfaces {
+        pub use wayland_client::protocol::__interfaces::*;
+        wayland_scanner::generate_interfaces!("./protocols/wlr-output-management-unstable-v1.xml");
+    }
+    use self::__interfaces::*;
+    wayland_scanner::generate_client_code!("./protocols/wlr-output-management-unstable-v1.xml");
+}

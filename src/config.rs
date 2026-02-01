@@ -6,9 +6,27 @@ use std::collections::HashMap; // 修复点 1：引入 HashMap
 use std::fs;
 use std::path::PathBuf;
 
+// 1. 定义显示器位置
+#[derive(Deserialize, Debug, Clone)]
+pub struct PositionConfig {
+    pub x: String,
+    pub y: String,
+}
+
+// 2. 每个显示器的具体配置
+#[derive(Deserialize, Debug, Clone)]
+pub struct OutputConfig {
+    #[serde(rename = "focus-at-startup")]
+    pub focus_at_startup: Option<String>,
+    pub mode: Option<String>,
+    pub scale: Option<String>,
+    pub transform: Option<String>,
+    pub position: Option<PositionConfig>,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppearanceConfig {
-    pub tag_icons: Option<Vec<String>>, // 用户可以定义一个图标数组
+    pub tag_icons: Option<Vec<String>>,
 }
 
 // 1. 对应 [input.keyboard] 部分
@@ -50,6 +68,7 @@ pub struct Config {
     pub input: Option<InputConfig>,
     pub keybindings: Option<HashMap<String, KeyBindingEntry>>,
     pub appearance: Option<AppearanceConfig>,
+    pub output: Option<HashMap<String, OutputConfig>>,
 }
 
 impl Config {
@@ -85,6 +104,7 @@ impl Config {
             input: None,
             keybindings: None,
             appearance: None,
+            output: None,
         }
     }
 }
