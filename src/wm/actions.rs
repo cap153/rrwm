@@ -1,6 +1,7 @@
 // src/wm/actions.rs
-use crate::wm::layout::Direction;
+use crate::wm::layout::{Direction, LayoutNode, SplitType}; // 修复点：引入布局相关的类型
 use crate::wm::AppState;
+use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -8,6 +9,7 @@ pub enum Action {
     Focus(Direction),
     FocusTag(u32),       // 切换到某个标签掩码
     MoveToTag(u32),      // 将窗口移动到某个标签掩码
+    Move(Direction),     // 统一处理方向性移动
     Spawn(Vec<String>),  // 纯净启动：[程序名, 参数1, 参数2]
     Shell(String),       // Shell 启动：一整串命令字符串
     ReloadConfiguration, // 重载配置
@@ -50,26 +52,24 @@ impl Action {
                     .and_then(|v| v.get(0))
                     .map(|s| s.as_str())
                     .unwrap_or("1");
-                match arg.parse::<u32>() {
-                    Ok(tag_idx) => Action::MoveToTag(1 << (tag_idx.saturating_sub(1))),
-                    Err(_) => {
-                        // 这里可以以后扩展 move left/right 到跨标签
-                        Action::Shell("true".to_string())
-                    }
+                if let Ok(tag_idx) = arg.parse::<u32>() {
+                    Action::MoveToTag(1 << (tag_idx.saturating_sub(1)))
+                } else {
+                    let dir = match arg.to_lowercase().as_str() {
+                        "left" => Direction::Left,
+                        "up" => Direction::Up,
+                        "down" => Direction::Down,
+                        _ => Direction::Right,
+                    };
+                    Action::Move(dir)
                 }
             }
 
             // "spawn" 模式：直接启动，不经过 sh
-            "spawn" => {
-                let cmd_list = args.clone().unwrap_or_default();
-                Action::Spawn(cmd_list)
-            }
+            "spawn" => Action::Spawn(args.clone().unwrap_or_default()),
 
             // "shell" 模式：交给 sh -c 处理复杂逻辑
-            "shell" => {
-                let cmd_str = cmd.clone().unwrap_or_default();
-                Action::Shell(cmd_str)
-            }
+            "shell" => Action::Shell(cmd.clone().unwrap_or_default()),
 
             _ => {
                 println!("警告：未知的动作名称 {}", name);
@@ -96,11 +96,27 @@ impl AppState {
             }
 
             // --- 移动窗口到标签逻辑 ---
-            Action::MoveToTag(mask) => {
-                if let Some(f_id) = &self.focused_window {
-                    if let Some(w_data) = self.windows.iter_mut().find(|w| &w.id == f_id) {
-                        println!("-> 将窗口 {:?} 移动到标签掩码: {:b}", f_id, mask);
-                        w_data.tags = mask;
+            Action::MoveToTag(target_mask) => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    self.move_window_to_tag(&f_id, target_mask, true); // true 表示跟随
+                }
+            }
+
+            // --- 方向性移动 (Super+Shift+n/i/u/e) ---
+            Action::Move(dir) => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    // 尝试在本地寻找邻居进行“换位”或“搬迁”
+                    if let Some(_neighbor_id) = self.find_neighbor(&f_id, dir) {
+                        // 本地移动逻辑：在 BSP 树中，这通常意味着移除并重新插入到邻居位置
+                        // 为了保持 Cosmic 风格简洁，我们暂时采用：移除 -> 在邻居方向重新插入
+                        self.move_window_locally(&f_id, dir);
+                    } else {
+                        // 边界情况：跨标签流转
+                        match dir {
+                            Direction::Right => self.move_window_relative(&f_id, 1),
+                            Direction::Left => self.move_window_relative(&f_id, -1),
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -162,6 +178,125 @@ impl AppState {
         }
     }
 
+    fn move_window_to_tag(&mut self, win_id: &ObjectId, target_mask: u32, follow: bool) {
+        let old_tag = match self.windows.iter().find(|w| &w.id == win_id) {
+            Some(w) => w.tags,
+            None => return,
+        };
+
+        if old_tag == target_mask {
+            return;
+        }
+
+        // --- 在迁出前，更新旧标签的焦点记忆 ---
+        if self.tag_focus_history.get(&old_tag) == Some(win_id) {
+            // 在旧标签里找一个“留守”的窗口作为新领袖
+            let replacement = self
+                .windows
+                .iter()
+                .find(|w| &w.id != win_id && (w.tags & old_tag) != 0)
+                .map(|w| w.id.clone());
+
+            if let Some(new_id) = replacement {
+                self.tag_focus_history.insert(old_tag, new_id);
+            } else {
+                // 如果旧标签搬空了，就删掉记录
+                self.tag_focus_history.remove(&old_tag);
+            }
+        }
+
+        // 1. 从旧树中彻底移除
+        if let Some(root) = self.layout_roots.remove(&old_tag) {
+            if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
+                self.layout_roots.insert(old_tag, new_root);
+            }
+        }
+        // 2. 更新窗口数据的标签
+        let mut win_data_opt = None;
+        if let Some(w_info) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+            w_info.tags = target_mask;
+            win_data_opt = Some(w_info.clone());
+        }
+
+        // 3. 插入到新树中
+        if let Some(w_data) = win_data_opt {
+            if let Some(mut root) = self.layout_roots.remove(&target_mask) {
+                // 找到新标签页的焦点窗口进行切割插入
+                let target_in_new = self
+                    .tag_focus_history
+                    .get(&target_mask)
+                    .cloned()
+                    .unwrap_or_else(|| w_data.id.clone());
+
+                // 默认垂直切分（左右）
+                root.insert_at(&target_in_new, w_data, SplitType::Vertical);
+                self.layout_roots.insert(target_mask, root);
+            } else {
+                // 如果目标标签是空的，直接设为根
+                self.layout_roots
+                    .insert(target_mask, LayoutNode::Window(w_data));
+            }
+        }
+
+        // 4. 更新焦点记忆
+        self.tag_focus_history.insert(target_mask, win_id.clone());
+
+        // 5. 如果需要跟随（bspwm 风格）
+        if follow {
+            self.focused_tags = target_mask;
+            self.focused_window = Some(win_id.clone());
+        }
+    }
+
+    /// 相对标签移动（向左/向右一个 Tag）
+    fn move_window_relative(&mut self, win_id: &ObjectId, delta: i32) {
+        let mut current_idx = 0;
+        for i in 0..9 {
+            if (self.focused_tags & (1 << i)) != 0 {
+                current_idx = i as i32;
+                break;
+            }
+        }
+        let next_idx = (current_idx + delta).rem_euclid(9) as u32;
+        let next_mask = 1 << next_idx;
+        self.move_window_to_tag(win_id, next_mask, true);
+    }
+
+    /// 本地移动：在同一 Tag 内重新排列
+    fn move_window_locally(&mut self, win_id: &ObjectId, dir: Direction) {
+        // 1. 尝试在当前方向寻找邻居
+        if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
+            println!("-> 发现邻居 {:?}，执行位置交换", neighbor_id);
+
+            // 执行树内交换
+            if let Some(root) = self.layout_roots.get_mut(&self.focused_tags) {
+                LayoutNode::swap_windows(root, win_id, &neighbor_id);
+            }
+            // 交换后，焦点依然跟着原来的窗口
+            self.focused_window = Some(win_id.clone());
+            self.tag_focus_history
+                .insert(self.focused_tags, win_id.clone());
+        } else {
+            // 2. 边界判定：如果水平方向没邻居了，执行跨标签流转（bspwm 风格）
+            match dir {
+                Direction::Left => {
+                    println!("-> 左边界已达，跨标签移动至上一个 Tag");
+                    self.move_window_relative(win_id, -1);
+                }
+                Direction::Right => {
+                    println!("-> 右边界已达，跨标签移动至下一个 Tag");
+                    self.move_window_relative(win_id, 1);
+                }
+                _ => {
+                    println!("-> 上下边界已达，暂不处理跨标签");
+                }
+            }
+        }
+        // --- 手动触发重新排版 ---
+        if let Some(wm) = &self.river_wm {
+            wm.manage_dirty();
+        }
+    }
     /// 标签页流转逻辑：实现类似 bspwm 的 desktop -f next/prev
     fn cycle_tag(&mut self, delta: i32) {
         // 假设我们只用 1-9 号标签
@@ -181,11 +316,7 @@ impl AppState {
     }
 
     /// 邻居查找，严格方向判定
-    fn find_neighbor(
-        &self,
-        current_id: &wayland_backend::client::ObjectId,
-        dir: Direction,
-    ) -> Option<wayland_backend::client::ObjectId> {
+    fn find_neighbor(&self, current_id: &ObjectId, dir: Direction) -> Option<ObjectId> {
         let cur_geo = self.last_geometry.get(current_id)?;
 
         self.windows

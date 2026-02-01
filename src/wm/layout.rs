@@ -97,6 +97,54 @@ impl LayoutNode {
             }
         }
     }
+
+    pub fn swap_windows(node: &mut Self, id1: &ObjectId, id2: &ObjectId) {
+        // 1. 先把两个窗口的数据找出来
+        fn find_data(n: &LayoutNode, target: &ObjectId) -> Option<WindowData> {
+            match n {
+                LayoutNode::Window(w) if &w.id == target => Some(w.clone()),
+                LayoutNode::Container {
+                    left_child,
+                    right_child,
+                    ..
+                } => find_data(left_child, target).or_else(|| find_data(right_child, target)),
+                _ => None,
+            }
+        }
+
+        let d1 = find_data(node, id1);
+        let d2 = find_data(node, id2);
+
+        // 2. 如果都找到了，用单次递归进行“同时替换”
+        if let (Some(data1), Some(data2)) = (d1, d2) {
+            fn perform_swap(
+                n: &mut LayoutNode,
+                id1: &ObjectId,
+                d1: &WindowData,
+                id2: &ObjectId,
+                d2: &WindowData,
+            ) {
+                match n {
+                    LayoutNode::Window(w) => {
+                        if &w.id == id1 {
+                            *w = d2.clone(); // 发现 A 的位子，塞入 B 的数据
+                        } else if &w.id == id2 {
+                            *w = d1.clone(); // 发现 B 的位子，塞入 A 的数据
+                        }
+                    }
+                    LayoutNode::Container {
+                        left_child,
+                        right_child,
+                        ..
+                    } => {
+                        perform_swap(left_child, id1, d1, id2, d2);
+                        perform_swap(right_child, id1, d1, id2, d2);
+                    }
+                }
+            }
+            perform_swap(node, id1, &data1, id2, &data2);
+        }
+    }
 }
 
 pub fn calculate_layout(
