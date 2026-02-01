@@ -431,22 +431,56 @@ impl AppState {
             wm.manage_dirty();
         }
     }
-    /// 标签页流转逻辑：实现类似 bspwm 的 desktop -f next/prev
+    /// 智能动态流转逻辑
     fn cycle_tag(&mut self, delta: i32) {
-        // 假设我们只用 1-9 号标签
-        let mut current_idx = 0;
-        for i in 0..9 {
-            if (self.focused_tags & (1 << i)) != 0 {
-                current_idx = i as i32;
-                break;
-            }
-        }
+        // 1. 获取当前 Tag 的索引 (0-31)
+        // trailing_zeros() 对于 0001 返回 0，对于 0010 返回 1，比循环更高效
+        let current_idx = self.focused_tags.trailing_zeros();
 
-        let next_idx = (current_idx + delta).rem_euclid(9) as u32;
+        // 2. 计算动态边界 (Dynamic Boundary)
+        let occupied = self.get_occupied_tags();
+        
+        // 找到最高位的 1 在哪里。如果没有窗口，max_occupied_idx 设为 0 (Tag 1)
+        // 32 - leading_zeros - 1 得到最高位的索引
+        let max_occupied_idx = if occupied == 0 {
+            0
+        } else {
+            32 - occupied.leading_zeros() - 1
+        };
+
+        // 边界 = 最大占用索引 + 1 (保留一个备用空位)
+        // 限制最大为 8 (即 Tag 9)，防止跑到 Tag 10+ 去
+        let bound_idx = (max_occupied_idx + 1).min(8);
+
+        // 3. 计算目标索引
+        let next_idx = if delta > 0 {
+            // --- 向右移动 ---
+            if current_idx >= bound_idx {
+                // 如果当前已经在边界（或者意外超出了边界），回到 Tag 1
+                0 
+            } else {
+                // 否则正常向右
+                current_idx + 1
+            }
+        } else {
+            // --- 向左移动 ---
+            if current_idx == 0 {
+                // 如果在 Tag 1，跳到边界 (最右有窗口Tag + 1)
+                bound_idx
+            } else {
+                // 否则正常向左
+                current_idx - 1
+            }
+        };
+
         let next_mask = 1 << next_idx;
 
-        println!("-> 触碰边界，流转至 Tag {}", next_idx + 1);
-        self.focused_tags = next_mask;
+        // 仅当 Tag 真正改变时才执行操作，避免日志刷屏
+        if next_mask != self.focused_tags {
+            println!("-> 动态流转: Tag {} -> Tag {}", current_idx + 1, next_idx + 1);
+            self.focused_tags = next_mask;
+            // River 会在下一帧自动感知 focused_tags 变化并发起 ManageStart
+        }
     }
 
     /// 邻居查找，严格方向判定
