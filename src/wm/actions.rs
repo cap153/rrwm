@@ -1,7 +1,24 @@
 // src/wm/actions.rs
 use crate::wm::layout::{Direction, LayoutNode, SplitType}; // 修复点：引入布局相关的类型
 use crate::wm::AppState;
+use serde::Serialize;
+use std::io::Write;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
+
+// 定义发送给 Bar 的状态数据包
+#[derive(Serialize, Clone)]
+pub struct RrwmStatus {
+    pub focused_tags: u32,     // 当前正在看哪个标签 (掩码)
+    pub occupied_tags: u32,    // 哪些标签里有窗口 (掩码)
+    pub active_window: String, // 当前聚焦的窗口标题 (比如 "Kitty")
+}
+
+#[derive(Serialize, Clone)]
+pub struct WaybarResponse {
+    pub text: String,
+    pub tooltip: String,
+    pub class: String,
+}
 
 #[derive(PartialEq)]
 enum MoveHint {
@@ -172,7 +189,120 @@ impl AppState {
         }
     }
 
-    /// 核心：搬迁窗口至新 Tag 的指定边缘
+    /// 核心：处理 IPC 连接（迎接新听众）
+    pub fn handle_ipc_connections(&mut self) {
+        if let Some(ref listener) = self.ipc_listener {
+            // 尝试接受新连接（因为是非阻塞的，所以没连接时会立刻报错并跳过）
+            while let Ok((mut stream, _)) = listener.accept() {
+                println!("-> IPC: 发现新听众 (Bar/Script)");
+                // 刚连进来时，先给它发一个当前状态，别让人家等着
+                let _ = self.send_status_to_stream(&mut stream);
+                self.ipc_clients.push(stream);
+            }
+        }
+    }
+
+    /// 核心：向所有听众广播状态
+    pub fn broadcast_status(&mut self) {
+        if self.ipc_clients.is_empty() {
+            return;
+        }
+
+        let occupied = self.get_occupied_tags();
+        let user_icons = self
+            .config
+            .appearance
+            .as_ref()
+            .and_then(|a| a.tag_icons.as_ref());
+        let mut tag_strings = Vec::new();
+
+        // --- 核心算法：计算动态显示的截止点 ---
+        // 1. 找到最大的“被占用”标签索引 (0-31)
+        // 32 - leading_zeros 得到的是位数，减 1 才是索引
+        let max_occupied_idx = if occupied == 0 {
+            0
+        } else {
+            32 - occupied.leading_zeros() - 1
+        };
+
+        // 2. 找到当前“被聚焦”标签索引
+        let focused_idx = if self.focused_tags == 0 {
+            0
+        } else {
+            32 - self.focused_tags.leading_zeros() - 1
+        };
+
+        // 3. 决定显示范围：取两者的最大值，再 +1 (保留一个空位作为缓冲)
+        let visual_bound = (max_occupied_idx.max(focused_idx) + 1).min(8);
+
+        // --- 循环生成 ---
+        for i in 0..=visual_bound {
+            let mask = 1 << i;
+            let icon = user_icons
+                .and_then(|icons| icons.get(i as usize))
+                .cloned()
+                .unwrap_or_else(|| (i + 1).to_string());
+
+            let styled_icon = if (self.focused_tags & mask) != 0 {
+                format!("<span color='#bd93f9' underline='single'>{}</span>", icon)
+            } else if (occupied & mask) != 0 {
+                format!("<span color='#ffffff'>{}</span>", icon)
+            } else {
+                format!("<span color='#666666'>{}</span>", icon)
+            };
+            tag_strings.push(styled_icon);
+        }
+
+        let response = WaybarResponse {
+            text: tag_strings.join("  "),
+            tooltip: format!("Focus: {}", self.get_active_window_title()),
+            class: "rrwm-status".to_string(),
+        };
+
+        if let Ok(mut json) = serde_json::to_string(&response) {
+            json.push('\n');
+            self.ipc_clients
+                .retain_mut(|client| std::io::Write::write_all(client, json.as_bytes()).is_ok());
+        }
+    }
+
+    // 内部辅助：向单个流发送状态
+    fn send_status_to_stream(
+        &self,
+        stream: &mut std::os::unix::net::UnixStream,
+    ) -> std::io::Result<()> {
+        let status = RrwmStatus {
+            focused_tags: self.focused_tags,
+            occupied_tags: self.get_occupied_tags(),
+            active_window: self.get_active_window_title(),
+        };
+        let mut json = serde_json::to_string(&status).unwrap();
+        json.push('\n');
+        stream.write_all(json.as_bytes())
+    }
+
+    /// 计算哪些标签有窗口
+    pub fn get_occupied_tags(&self) -> u32 {
+        let mut mask = 0u32;
+        for w in &self.windows {
+            if w.app_id.is_some() {
+                mask |= w.tags;
+            }
+        }
+        mask
+    }
+
+    /// 获取焦点窗口标题
+    pub fn get_active_window_title(&self) -> String {
+        if let Some(f_id) = &self.focused_window {
+            if let Some(w) = self.windows.iter().find(|w| &w.id == f_id) {
+                return w.app_id.clone().unwrap_or_else(|| "Unknown".to_string());
+            }
+        }
+        "".to_string()
+    }
+
+    /// 搬迁窗口至新 Tag
     fn move_window_to_tag(
         &mut self,
         win_id: &ObjectId,

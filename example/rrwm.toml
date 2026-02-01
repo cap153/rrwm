@@ -6,6 +6,9 @@ variant = "colemak"
 # options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
 model = "pc105" # 一般可选，默认 pc105
 
+[appearance]
+tag_icons = ["",  "", "", "", "", ""]
+
 [keybindings.alt]
 # 关闭聚焦窗口
 q = { action = "close_focused" }

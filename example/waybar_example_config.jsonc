@@ -1,0 +1,9 @@
+{
+	"modules-left": ["custom/rrwm_tags"],
+	"custom/rrwm_tags": {
+			"format": "{}",
+			"return-type": "json",
+			"exec": "rrwm --status",
+			"escape": false
+	},
+}

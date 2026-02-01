@@ -6,6 +6,11 @@ use std::collections::HashMap; // 修复点 1：引入 HashMap
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct AppearanceConfig {
+    pub tag_icons: Option<Vec<String>>, // 用户可以定义一个图标数组
+}
+
 // 1. 对应 [input.keyboard] 部分
 #[derive(Deserialize, Debug, Clone)]
 pub struct KeyboardConfig {
@@ -44,6 +49,7 @@ pub enum KeyBindingEntry {
 pub struct Config {
     pub input: Option<InputConfig>,
     pub keybindings: Option<HashMap<String, KeyBindingEntry>>,
+    pub appearance: Option<AppearanceConfig>,
 }
 
 impl Config {
@@ -75,9 +81,10 @@ impl Config {
         }
 
         // 修复点 2：补全 keybindings 字段初始化
-        Config { 
+        Config {
             input: None,
-            keybindings: None 
+            keybindings: None,
+            appearance: None,
         }
     }
 }
@@ -120,7 +127,7 @@ pub fn get_default_bindings() -> Vec<DefaultBinding> {
         DefaultBinding {
             mods: Modifiers::Mod1,
             key: "Return",
-            action: Action::Spawn(vec!["kitty".to_string()]), 
+            action: Action::Spawn(vec!["kitty".to_string()]),
         },
     ]
 }

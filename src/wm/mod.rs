@@ -37,6 +37,7 @@ use crate::protocol::river_xkb_config::river_xkb_keymap_v1::{
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use wayland_backend::client::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -47,6 +48,7 @@ pub struct KeyBinding {
     pub obj: RiverXkbBindingV1,
     pub action: Action,
 }
+
 
 #[derive(Debug, Clone)]
 pub struct OutputData {
@@ -88,6 +90,8 @@ pub struct AppState {
     pub current_keymap: Option<RiverXkbKeymapV1>,
     pub layer_shell_manager: Option<RiverLayerShellV1>,
     pub device_names: HashMap<ObjectId, String>,
+    pub ipc_listener: Option<UnixListener>,
+    pub ipc_clients: Vec<UnixStream>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -172,7 +176,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 });
             }
             WmEvent::ManageStart => {
-                // 智能焦点恢复
+                // --- IPC 广播逻辑 ---
+                // 看看有没有新的 Waybar 想听广播
+                state.handle_ipc_connections();
+                // 向所有在线的听众播报当前的标签和窗口状态
+                state.broadcast_status();
+
+                // --- 智能焦点恢复 ---
                 // 逻辑：如果当前焦点窗口不存在，或者当前焦点窗口在当前标签页不可见，才尝试恢复历史
                 let needs_restore = match &state.focused_window {
                     Some(f_id) => {
