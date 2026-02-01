@@ -32,6 +32,7 @@ fn main() {
         input_manager: None,
         xkb_config: None,
         keyboards: Vec::new(),
+        current_keymap: None,
         layer_shell_manager: None,
     };
 

@@ -82,6 +82,7 @@ pub struct AppState {
     pub input_manager: Option<RiverInputManagerV1>,
     pub xkb_config: Option<RiverXkbConfigV1>,
     pub keyboards: Vec<RiverXkbKeyboardV1>,
+    pub current_keymap: Option<RiverXkbKeymapV1>,
     pub layer_shell_manager: Option<RiverLayerShellV1>,
 }
 
@@ -156,54 +157,15 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 self::binds::setup_keybindings(state, qh);
             }
             WmEvent::Window { id } => {
-                println!("-> 发现新窗口，执行 Cosmic 切割: {:?}", id.id());
-                let new_data = WindowData {
+                // 仅预登记，不执行切割，也不分配焦点
+                println!("-> 发现新窗口，等待分配 AppId: {:?}", id.id());
+                state.windows.push(WindowData {
                     id: id.id(),
                     window: id.clone(),
                     node: None,
-                    tags: state.focused_tags, // 分配到当前活跃标签
+                    tags: state.focused_tags, // 预分配到当前标签
                     app_id: None,
-                };
-                state.windows.push(new_data.clone());
-
-                let current_tag = state.focused_tags;
-
-                // 如果这个标签还没有树，它就是根节点
-                if !state.layout_roots.contains_key(&current_tag) {
-                    state
-                        .layout_roots
-                        .insert(current_tag, LayoutNode::Window(new_data.clone()));
-                } else {
-                    // 否则，从 Map 里暂时取出树进行切割
-                    if let Some(mut root) = state.layout_roots.remove(&current_tag) {
-                        // 找到该标签上次聚焦的窗口作为切割目标
-                        let target_id = state
-                            .tag_focus_history
-                            .get(&current_tag)
-                            .cloned()
-                            .unwrap_or_else(|| new_data.id.clone());
-
-                        let split = if let Some(geo) = state.last_geometry.get(&target_id) {
-                            if geo.w > geo.h {
-                                SplitType::Vertical
-                            } else {
-                                SplitType::Horizontal
-                            }
-                        } else {
-                            SplitType::Vertical
-                        };
-
-                        root.insert_at(&target_id, new_data.clone(), split);
-                        state.layout_roots.insert(current_tag, root);
-                    }
-                }
-
-                // 更新焦点记忆
-                state.focused_window = Some(id.id());
-                state.tag_focus_history.insert(current_tag, id.id());
-                if let Some(seat) = &state.main_seat {
-                    seat.focus_window(&id);
-                }
+                });
             }
             WmEvent::ManageStart => {
                 // 智能焦点恢复
@@ -234,10 +196,17 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                 // B. 显隐控制：只显示属于当前活跃标签的窗口
                 for w_data in &state.windows {
-                    if (w_data.tags & state.focused_tags) != 0 {
-                        w_data.window.show();
-                    } else {
-                        w_data.window.hide();
+                    // 只有拿到 AppId 且不是输入法的窗口，我们才去管它的死活
+                    if let Some(ref app_id) = w_data.app_id {
+                        if app_id.contains("fcitx") {
+                            continue; // 输入法窗口保持隐身，交给 River 默认处理
+                        }
+
+                        if (w_data.tags & state.focused_tags) != 0 {
+                            w_data.window.show();
+                        } else {
+                            w_data.window.hide();
+                        }
                     }
                 }
 
@@ -271,9 +240,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                     state.last_geometry.clear();
                     for (window, geom) in results {
-                        state.last_geometry.insert(window.id(), geom);
-                        window.propose_dimensions(geom.w, geom.h);
-                        window.set_tiled(Edges::all());
+                        // 再次检查 ID 确保它是我们记录在案的有效窗口
+                        if let Some(w_info) = state.windows.iter().find(|w| w.id == window.id()) {
+                            if w_info.app_id.is_some() {
+                                state.last_geometry.insert(window.id(), geom);
+                                window.propose_dimensions(geom.w, geom.h);
+                                window.set_tiled(Edges::all());
+                            }
+                        }
                     }
                 }
 
@@ -468,27 +442,83 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 // 此时不需要做任何事，River 随后会自动发 ManageStart
             }
             WinEvent::AppId { app_id } => {
-                println!("-> 窗口 ID {:?} 的 AppId 是: {:?}", proxy.id(), app_id);
-                // 更新列表里的 app_id
-                if let Some(w_info) = state.windows.iter_mut().find(|w| w.id == proxy.id()) {
+                let id = proxy.id();
+                println!("-> 窗口 ID {:?} 获得 AppId: {:?}", id, app_id);
+
+                // 1. 更新内存里的 app_id
+                if let Some(w_info) = state.windows.iter_mut().find(|w| w.id == id) {
                     w_info.app_id = app_id.clone();
                 }
 
-                // --- 核心逻辑：如果是 fcitx，将其从布局树中踢出去 ---
-                if let Some(id_str) = app_id {
+                // 2. 过滤黑名单：如果是 fcitx5 相关窗口，直接无视，不参与平铺
+                if let Some(ref id_str) = app_id {
                     if id_str.contains("fcitx") {
-                        // 1. 从当前的布局树中移除它
-                        if let Some(root) = state.layout_roots.remove(&state.focused_tags) {
-                            state.layout_roots.insert(
-                                state.focused_tags,
-                                LayoutNode::remove_at(root, &proxy.id()).unwrap_or_else(|| {
-                                    // 如果删掉后树空了，这里逻辑要处理
-                                    // 我们稍后完善 layout_roots 的删除
-                                    panic!("不要在这里 panic，需要优雅处理空树");
-                                }),
-                            );
+                        println!("-> [跳过] 输入法窗口不参与平铺逻辑");
+                        return;
+                    }
+                } else {
+                    // 如果没有 app_id，为了系统稳定，我们也先不平铺它
+                    return;
+                }
+
+                // 3. 执行平铺逻辑 (只有从未被平铺过的窗口才执行)
+                // 检查该窗口是否已经存在于任何布局树中
+                let already_tiled = state.layout_roots.values().any(|root| {
+                    fn tree_contains(node: &LayoutNode, target: &ObjectId) -> bool {
+                        match node {
+                            LayoutNode::Window(w) => &w.id == target,
+                            LayoutNode::Container {
+                                left_child,
+                                right_child,
+                                ..
+                            } => {
+                                tree_contains(left_child, target)
+                                    || tree_contains(right_child, target)
+                            }
                         }
-                        println!("-> 检测到输入法窗口，已从平铺逻辑中排除");
+                    }
+                    tree_contains(root, &id)
+                });
+
+                if !already_tiled {
+                    let current_tag = state.focused_tags;
+                    // 拿到该窗口的数据副本
+                    let w_data = state.windows.iter().find(|w| w.id == id).cloned().unwrap();
+
+                    if !state.layout_roots.contains_key(&current_tag) {
+                        // 标签页的第一个窗口，设为根
+                        state
+                            .layout_roots
+                            .insert(current_tag, LayoutNode::Window(w_data));
+                    } else if let Some(mut root) = state.layout_roots.remove(&current_tag) {
+                        // 执行 Cosmic 分裂
+                        let target_id = state
+                            .tag_focus_history
+                            .get(&current_tag)
+                            .cloned()
+                            .unwrap_or_else(|| id.clone());
+
+                        let split = if let Some(geo) = state.last_geometry.get(&target_id) {
+                            if geo.w > geo.h {
+                                SplitType::Vertical
+                            } else {
+                                SplitType::Horizontal
+                            }
+                        } else {
+                            SplitType::Vertical
+                        };
+
+                        root.insert_at(&target_id, w_data, split);
+                        state.layout_roots.insert(current_tag, root);
+                    }
+
+                    // 4. 关键：更新焦点记忆
+                    // 只有在这里更新，才能确保焦点始终落在“有身份”的正经窗口上
+                    state.focused_window = Some(id.clone());
+                    state.tag_focus_history.insert(current_tag, id.clone());
+
+                    if let Some(seat) = &state.main_seat {
+                        seat.focus_window(proxy);
                     }
                 }
             }
@@ -528,6 +558,7 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
 }
 
 // --- 7. 键盘布局自动加载逻辑 ---
+
 impl Dispatch<RiverXkbConfigV1, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -538,13 +569,24 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
         qh: &QueueHandle<Self>,
     ) {
         if let ConfigEvent::XkbKeyboard { id } = event {
+            // 1. 始终把新发现的键盘存入列表
+            state.keyboards.push(id.clone());
+
+            // 2. 优化：如果已经创建过 Keymap 对象了，就没必要再写临时文件了
+            if state.current_keymap.is_some() {
+                // 后续在 KeymapEvent::Success 回调里会统一给 state.keyboards 里的所有设备设布局
+                return;
+            }
+
+            // 3. 只有第一次才执行生成逻辑
             if let Some(kb_cfg) = state
                 .config
                 .input
                 .as_ref()
                 .and_then(|i| i.keyboard.as_ref())
             {
-                println!("-> 加载布局: {} ({:?})", kb_cfg.layout, kb_cfg.variant);
+                println!("-> 首次发现硬件，生成布局映射: {}...", kb_cfg.layout);
+
                 let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
                 let rules = "evdev".to_string();
                 let model = kb_cfg.model.clone().unwrap_or_else(|| "pc105".to_string());
@@ -561,13 +603,17 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
                     options,
                     xkb::KEYMAP_COMPILE_NO_FLAGS,
                 );
+
                 if let Some(map) = keymap {
                     let keymap_str = map.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
                     let mut temp_file = tempfile::tempfile().expect("临时文件失败");
-                    temp_file.write_all(keymap_str.as_bytes()).ok();
+                    let _ = temp_file.write_all(keymap_str.as_bytes());
+
                     if let Some(mgr) = &state.xkb_config {
-                        mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
-                        state.keyboards.push(id);
+                        // 4. 创建 River 端的 Keymap 对象并存入缓存
+                        let river_keymap =
+                            mgr.create_keymap(temp_file.as_fd(), KeymapFormat::TextV1, qh, ());
+                        state.current_keymap = Some(river_keymap);
                     }
                 }
             }
