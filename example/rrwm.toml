@@ -12,7 +12,7 @@ tag_icons = ["",  "", "", "", "",  ]
 [keybindings.alt]
 # 关闭聚焦窗口
 q = { action = "close_focused" }
-# 焦点切换：通过 args 指定方向
+# 不同标签之间焦点切换
 1 = { action = "focus", args = ["1"] }
 2 = { action = "focus", args = ["2"] }
 3 = { action = "focus", args = ["3"] }
@@ -23,34 +23,26 @@ q = { action = "close_focused" }
 8 = { action = "focus", args = ["8"] }
 9 = { action = "focus", args = ["9"] }
 0 = { action = "focus", args = ["10"] }
-
+# 上下左右焦点切换，边界自动跨标签
 n = { action = "focus", args = ["left"] }
 i = { action = "focus", args = ["right"] }
 u = { action = "focus", args = ["up"] }
 e = { action = "focus", args = ["down"] }
-
 # 启动软件
 Return = { action = "spawn", args = ["kitty"] }
 x = { action="spawn", args=["chromium", "--proxy-server=http://127.0.0.1:7897", "https://aistudio.google.com"] }
 j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | /usr/bin/satty --filename -' }
 a = { action="spawn", args=["/usr/bin/fuzzel", "toggle"] }
 
+# 允许不同的修饰符
 [keybindings.super]
-1 = { action = "focus", args = ["1"] }
-2 = { action = "focus", args = ["2"] }
-3 = { action = "focus", args = ["3"] }
-4 = { action = "focus", args = ["4"] }
-5 = { action = "focus", args = ["5"] }
-6 = { action = "focus", args = ["6"] }
-7 = { action = "focus", args = ["7"] }
-8 = { action = "focus", args = ["8"] }
-9 = { action = "focus", args = ["9"] }
-0 = { action = "focus", args = ["10"] }
 Return = { action = "spawn", args = ["ghostty"] }
 
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
+# 重载配置
 c = { action = "reload_configuration" }
+# 跨标签移动窗口
 1 = { action = "move", args = ["1"] }
 2 = { action = "move", args = ["2"] }
 3 = { action = "move", args = ["3"] }
@@ -61,24 +53,28 @@ c = { action = "reload_configuration" }
 8 = { action = "move", args = ["8"] }
 9 = { action = "move", args = ["9"] }
 0 = { action = "move", args = ["10"] }
+# 上下左右移动窗口，边界自动跨标签
 n = { action = "move", args = ["left"] }
 i = { action = "move", args = ["right"] }
 u = { action = "move", args = ["up"] }
 e = { action = "move", args = ["down"] }
-Return = { action = "spawn", args = ["alacritty"] }
+
+# 如果想使用加号连接多重修饰符，需要加引号
 [keybindings."super+shift"]
 Space = { action = "spawn", args = ["wezterm"] }
 
-# 甚至没有修饰符的按键
+# 没有修饰符的按键
 [keybindings]
 F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
 [keybindings.none]
 F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
 
+# 多显示器之间切换焦点
 [keybindings.alt_ctrl]
 n = { action = "focus", args = ["left_output"] }
 i = { action = "focus", args = ["right_output"] }
 
+# 多显示器之间移动窗口
 [keybindings.alt_ctrl_shift]
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
