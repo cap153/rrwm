@@ -33,12 +33,14 @@ enum MoveHint {
 pub enum Action {
     CloseFocused,
     Focus(Direction),
-    FocusTag(u32),       // 切换到某个标签掩码
-    MoveToTag(u32),      // 将窗口移动到某个标签掩码
-    Move(Direction),     // 统一处理方向性移动
-    Spawn(Vec<String>),  // 纯净启动：[程序名, 参数1, 参数2]
-    Shell(String),       // Shell 启动：一整串命令字符串
-    ReloadConfiguration, // 重载配置
+    FocusTag(u32),           // 切换到某个标签掩码
+    MoveToTag(u32),          // 将窗口移动到某个标签掩码
+    Move(Direction),         // 统一处理方向性移动
+    FocusOutput(Direction),  // 处理 left_output / right_output
+    MoveToOutput(Direction), // 处理 left_output / right_output
+    Spawn(Vec<String>),      // 纯净启动：[程序名, 参数1, 参数2]
+    Shell(String),           // Shell 启动：一整串命令字符串
+    ReloadConfiguration,     // 重载配置
 }
 
 impl Action {
@@ -56,41 +58,44 @@ impl Action {
                     .and_then(|v| v.get(0))
                     .map(|s| s.as_str())
                     .unwrap_or("right");
-                // 判断参数是“方向字符串”还是“数字字符串”
-                match arg.parse::<u32>() {
-                    Ok(tag_idx) => Action::FocusTag(1 << (tag_idx.saturating_sub(1))),
-                    Err(_) => {
-                        // 如果是方向
-                        let dir = match arg.to_lowercase().as_str() {
-                            "left" => Direction::Left,
-                            "up" => Direction::Up,
-                            "down" => Direction::Down,
-                            _ => Direction::Right,
-                        };
-                        Action::Focus(dir)
+                match arg {
+                    "left_output" => Action::FocusOutput(Direction::Left),
+                    "right_output" => Action::FocusOutput(Direction::Right),
+                    "left" => Action::Focus(Direction::Left),
+                    "right" => Action::Focus(Direction::Right),
+                    "up" => Action::Focus(Direction::Up),
+                    "down" => Action::Focus(Direction::Down),
+                    _ => {
+                        if let Ok(idx) = arg.parse::<u32>() {
+                            Action::FocusTag(1 << (idx.saturating_sub(1)))
+                        } else {
+                            Action::Focus(Direction::Right)
+                        }
                     }
                 }
             }
-            // 对应 Action::MoveToTag (Super+Shift+数字)
             "move" => {
                 let arg = args
                     .as_ref()
                     .and_then(|v| v.get(0))
                     .map(|s| s.as_str())
                     .unwrap_or("1");
-                if let Ok(tag_idx) = arg.parse::<u32>() {
-                    Action::MoveToTag(1 << (tag_idx.saturating_sub(1)))
-                } else {
-                    let dir = match arg.to_lowercase().as_str() {
-                        "left" => Direction::Left,
-                        "up" => Direction::Up,
-                        "down" => Direction::Down,
-                        _ => Direction::Right,
-                    };
-                    Action::Move(dir)
+                match arg {
+                    "left_output" => Action::MoveToOutput(Direction::Left),
+                    "right_output" => Action::MoveToOutput(Direction::Right),
+                    "left" => Action::Move(Direction::Left),
+                    "right" => Action::Move(Direction::Right),
+                    "up" => Action::Move(Direction::Up),
+                    "down" => Action::Move(Direction::Down),
+                    _ => {
+                        if let Ok(idx) = arg.parse::<u32>() {
+                            Action::MoveToTag(1 << (idx.saturating_sub(1)))
+                        } else {
+                            Action::Move(Direction::Right)
+                        }
+                    }
                 }
             }
-
             // "spawn" 模式：直接启动，不经过 sh
             "spawn" => Action::Spawn(args.clone().unwrap_or_default()),
 
@@ -105,6 +110,116 @@ impl Action {
     }
 }
 impl AppState {
+    fn cycle_output_focus(&mut self, dir: Direction) {
+        let current_out = match &self.focused_output {
+            Some(id) => id,
+            None => return,
+        };
+
+        // 按物理坐标 X 排序显示器
+        let mut sorted: Vec<_> = self.outputs.iter().collect();
+        sorted.sort_by_key(|(_, data)| data.usable_area.x);
+
+        if let Some(pos) = sorted.iter().position(|(id, _)| *id == current_out) {
+            let next_idx = match dir {
+                Direction::Right => (pos + 1) % sorted.len(),
+                Direction::Left => (pos + sorted.len() - 1) % sorted.len(),
+                _ => pos,
+            };
+
+            let (next_id, _) = sorted[next_idx];
+            println!("-> [显示器焦点] 从 {:?} 切换至 {:?}", current_out, next_id);
+
+            self.focused_output = Some(next_id.clone());
+
+            // 恢复该显示器在当前 Tag 下的历史焦点窗口
+            self.focused_window = self
+                .tag_focus_history
+                .get(&(next_id.clone(), self.focused_tags))
+                .cloned();
+
+            if let Some(wm) = &self.river_wm {
+                wm.manage_dirty();
+            }
+        }
+    }
+    /// 将窗口从一个物理显示器搬到另一个物理显示器（保持在当前 Tag）
+    fn move_window_to_output(&mut self, win_id: &ObjectId, dir: Direction) {
+        // 1. 获取窗口当前归属
+        let (out_id, tags) = match self.windows.iter().find(|w| &w.id == win_id) {
+            Some(w) => (w.output.clone(), w.tags),
+            None => return,
+        };
+        let out_id = match out_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // 2. 寻找目标显示器
+        let mut sorted: Vec<_> = self.outputs.iter().collect();
+        sorted.sort_by_key(|(_, data)| data.usable_area.x);
+
+        if let Some(pos) = sorted.iter().position(|(id, _)| *id == &out_id) {
+            let next_idx = match dir {
+                Direction::Right => (pos + 1) % sorted.len(),
+                Direction::Left => (pos + sorted.len() - 1) % sorted.len(),
+                _ => pos,
+            };
+            if next_idx == pos {
+                return;
+            }
+
+            let (next_out_id, _) = sorted[next_idx];
+            let next_out_id = next_out_id.clone();
+
+            println!(
+                "-> [搬迁] 窗口 {:?} 从显示器 {:?} 搬至 {:?}",
+                win_id, out_id, next_out_id
+            );
+
+            // 3. 从旧显示器的 BSP 树中移除
+            let old_key = (out_id.clone(), tags);
+            if let Some(root) = self.layout_roots.remove(&old_key) {
+                if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
+                    self.layout_roots.insert(old_key, new_root);
+                }
+            }
+
+            // 4. 更新窗口元数据
+            let mut win_data = None;
+            if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+                w.output = Some(next_out_id.clone());
+                win_data = Some(w.clone());
+            }
+
+            // 5. 插入目标显示器的 BSP 树 (当前 Tag)
+            if let Some(w_data) = win_data {
+                let new_key = (next_out_id.clone(), tags);
+
+                if let Some(old_root) = self.layout_roots.remove(&new_key) {
+                    let new_root = LayoutNode::Container {
+                        split_type: SplitType::Vertical,
+                        ratio: 0.5,
+                        left_child: Box::new(LayoutNode::Window(w_data)),
+                        right_child: Box::new(old_root),
+                    };
+                    self.layout_roots.insert(new_key.clone(), new_root); // 【修正】使用 .clone()
+                } else {
+                    self.layout_roots
+                        .insert(new_key.clone(), LayoutNode::Window(w_data)); // 【修正】使用 .clone()
+                }
+
+                // 焦点跟随搬迁
+                self.focused_output = Some(next_out_id.clone());
+                self.focused_window = Some(win_id.clone());
+                self.tag_focus_history.insert(new_key, win_id.clone()); // 【修正】使用原件，因为它在后面不需要了
+            }
+
+            if let Some(wm) = &self.river_wm {
+                wm.manage_dirty();
+            }
+        }
+    }
     pub fn apply_output_configs(&mut self, qh: &QueueHandle<Self>, serial: u32) {
         let mgr = match &self.output_manager {
             Some(m) => m,
@@ -291,6 +406,12 @@ impl AppState {
                 self.current_keymap = None;
                 println!("-> 配置已重载，新的布局将在下次键盘接入或手动触发时生效");
             }
+            Action::FocusOutput(dir) => self.cycle_output_focus(dir),
+            Action::MoveToOutput(dir) => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    self.move_window_to_output(&f_id, dir);
+                }
+            }
             // --- 标签切换逻辑 ---
             Action::FocusTag(mask) => {
                 println!("-> 切换标签掩码为: {:b}", mask);
@@ -340,22 +461,29 @@ impl AppState {
                     .ok();
             }
             Action::Focus(dir) => {
-                // 1. 定义一个变量记录是否在本页成功跳转了焦点
+                // 这里恢复你原本的纯 BSP 焦点切换逻辑
                 let mut moved_locally = false;
-                // 2. 只有在有焦点窗口时才尝试找邻居
                 if let Some(f_id) = &self.focused_window {
                     if let Some(new_focus) = self.find_neighbor(f_id, dir) {
                         self.focused_window = Some(new_focus.clone());
-                        self.tag_focus_history.insert(self.focused_tags, new_focus);
+                        // 更新焦点记忆 (ObjectId, u32)
+                        if let Some(out_id) = &self
+                            .windows
+                            .iter()
+                            .find(|w| w.id == new_focus)
+                            .and_then(|w| w.output.clone())
+                        {
+                            self.tag_focus_history
+                                .insert((out_id.clone(), self.focused_tags), new_focus.clone());
+                        }
                         moved_locally = true;
                     }
                 }
-                // 3. 如果没有在本页跳转成功（可能是没邻居，也可能是根本没窗口）
                 if !moved_locally {
                     match dir {
-                        Direction::Right => self.cycle_tag(1), // 向右切到下一个标签
-                        Direction::Left => self.cycle_tag(-1), // 向左切到上一个标签
-                        _ => {}                                // 上下方向通常不跨标签
+                        Direction::Right => self.cycle_tag(1),
+                        Direction::Left => self.cycle_tag(-1),
+                        _ => {}
                     }
                 }
             }
@@ -490,32 +618,42 @@ impl AppState {
         follow: bool,
         hint: MoveHint,
     ) {
-        let old_tag = match self.windows.iter().find(|w| &w.id == win_id) {
-            Some(w) => w.tags,
+        let (old_tag, out_id) = match self.windows.iter().find(|w| &w.id == win_id) {
+            Some(w) => (w.tags, w.output.clone()),
+            None => return,
+        };
+        let out_id = match out_id {
+            Some(id) => id,
             None => return,
         };
         if old_tag == target_mask {
             return;
         }
 
-        // 1. 接班人逻辑：如果焦点走了，给旧标签指派新领袖
-        if self.tag_focus_history.get(&old_tag) == Some(win_id) {
+        let old_key = (out_id.clone(), old_tag);
+        let new_key = (out_id.clone(), target_mask);
+
+        // 1. 接班人逻辑 (使用 old_key)
+        if self.tag_focus_history.get(&old_key) == Some(win_id) {
             let replacement = self
                 .windows
                 .iter()
-                .find(|w| &w.id != win_id && (w.tags & old_tag) != 0)
+                .find(|w| {
+                    &w.id != win_id && w.output.as_ref() == Some(&out_id) && (w.tags & old_tag) != 0
+                })
                 .map(|w| w.id.clone());
+
             if let Some(rid) = replacement {
-                self.tag_focus_history.insert(old_tag, rid);
+                self.tag_focus_history.insert(old_key.clone(), rid); // 【修正】使用 old_key.clone()
             } else {
-                self.tag_focus_history.remove(&old_tag);
+                self.tag_focus_history.remove(&old_key);
             }
         }
 
-        // 2. 从旧树中移除
-        if let Some(root) = self.layout_roots.remove(&old_tag) {
+        // 2. 从旧树中移除 (使用 old_key)
+        if let Some(root) = self.layout_roots.remove(&old_key) {
             if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
-                self.layout_roots.insert(old_tag, new_root);
+                self.layout_roots.insert(old_key, new_root); // 【修正】这里用 old_key 原件就行
             }
         }
 
@@ -526,9 +664,10 @@ impl AppState {
             win_data_opt = Some(w_info.clone());
         }
 
-        // 4. 插入新树：这种插入方式非常简单高效，直接包裹旧树
+        // 4. 插入新树
         if let Some(w_data) = win_data_opt {
-            if let Some(old_root) = self.layout_roots.remove(&target_mask) {
+            if let Some(old_root) = self.layout_roots.remove(&new_key) {
+                // 还原完整的 match 逻辑
                 let new_root = match hint {
                     MoveHint::Leftmost => LayoutNode::Container {
                         split_type: SplitType::Vertical,
@@ -543,16 +682,18 @@ impl AppState {
                         right_child: Box::new(LayoutNode::Window(w_data)),
                     },
                 };
-                self.layout_roots.insert(target_mask, new_root);
+                // 插入：使用 new_key.clone()
+                self.layout_roots.insert(new_key.clone(), new_root);
             } else {
                 // 目标 Tag 是空的，直接做根节点
+                // 插入：使用 new_key.clone()
                 self.layout_roots
-                    .insert(target_mask, LayoutNode::Window(w_data));
+                    .insert(new_key.clone(), LayoutNode::Window(w_data));
             }
         }
 
         // 5. 状态同步
-        self.tag_focus_history.insert(target_mask, win_id.clone());
+        self.tag_focus_history.insert(new_key, win_id.clone());
         if follow {
             self.focused_tags = target_mask;
             self.focused_window = Some(win_id.clone());
@@ -578,18 +719,26 @@ impl AppState {
 
     /// 本地移动：在同一 Tag 内重新排列
     fn move_window_locally(&mut self, win_id: &ObjectId, dir: Direction) {
+        let out_id = match self
+            .windows
+            .iter()
+            .find(|w| &w.id == win_id)
+            .and_then(|w| w.output.clone())
+        {
+            Some(id) => id,
+            None => return,
+        };
         // 1. 尝试在当前方向寻找邻居
         if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
             println!("-> 发现邻居 {:?}，执行位置交换", neighbor_id);
-
+            let tree_key = (out_id.clone(), self.focused_tags);
             // 执行树内交换
-            if let Some(root) = self.layout_roots.get_mut(&self.focused_tags) {
+            if let Some(root) = self.layout_roots.get_mut(&tree_key) {
                 LayoutNode::swap_windows(root, win_id, &neighbor_id);
             }
             // 交换后，焦点依然跟着原来的窗口
             self.focused_window = Some(win_id.clone());
-            self.tag_focus_history
-                .insert(self.focused_tags, win_id.clone());
+            self.tag_focus_history.insert(tree_key, win_id.clone());
         } else {
             // 2. 边界判定：如果水平方向没邻居了，执行跨标签流转（bspwm 风格）
             match dir {

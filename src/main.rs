@@ -6,7 +6,7 @@ use crate::wm::AppState;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::{UnixListener, UnixStream}; 
+use std::os::unix::net::{UnixListener, UnixStream};
 use wayland_client::Connection;
 
 fn main() {
@@ -46,7 +46,6 @@ fn main() {
         main_seat: None,
         current_width: 0,
         current_height: 0,
-        layout_roots: HashMap::new(),
         tag_focus_history: HashMap::new(),
         last_geometry: HashMap::new(),
         focused_window: None,
@@ -64,6 +63,8 @@ fn main() {
         output_manager: None,
         heads: Vec::new(),
         last_output_serial: 0,
+        layout_roots: HashMap::new(),
+        focused_output: None,
     };
 
     let _registry = display.get_registry(&qh, ());

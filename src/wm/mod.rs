@@ -72,6 +72,7 @@ pub struct WindowData {
     pub node: Option<RiverNodeV1>,
     pub tags: u32,
     pub app_id: Option<String>,
+    pub output: Option<ObjectId>,
 }
 
 pub struct ModeInfo {
@@ -97,8 +98,7 @@ pub struct AppState {
     pub main_seat: Option<RiverSeatV1>,
     pub current_width: i32,
     pub current_height: i32,
-    pub layout_roots: HashMap<u32, LayoutNode>,
-    pub tag_focus_history: HashMap<u32, ObjectId>,
+    pub tag_focus_history: HashMap<(ObjectId, u32), ObjectId>,
     pub last_geometry: HashMap<ObjectId, Geometry>,
     pub focused_window: Option<ObjectId>,
     pub focused_tags: u32,
@@ -115,6 +115,8 @@ pub struct AppState {
     pub output_manager: Option<ZwlrOutputManagerV1>,
     pub heads: Vec<HeadInfo>,
     pub last_output_serial: u32,
+    pub layout_roots: HashMap<(ObjectId, u32), LayoutNode>,
+    pub focused_output: Option<ObjectId>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -184,6 +186,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 self::binds::setup_keybindings(state, qh);
             }
             WmEvent::Window { id } => {
+                // 默认分配到当前活跃显示器，如果没有活跃显示器，就暂时不分配
+                let current_out = state.focused_output.clone();
                 // 仅预登记，不执行切割，也不分配焦点
                 println!("-> 发现新窗口，等待分配 AppId: {:?}", id.id());
                 state.windows.push(WindowData {
@@ -192,33 +196,39 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     node: None,
                     tags: state.focused_tags, // 预分配到当前标签
                     app_id: None,
+                    output: current_out,
                 });
             }
             WmEvent::ManageStart => {
-                // --- IPC 广播逻辑 ---
-                // 看看有没有新的 Waybar 想听广播
+                // 1. 基础工作：处理 IPC 和广播状态
                 state.handle_ipc_connections();
-                // 向所有在线的听众播报当前的标签和窗口状态
                 state.broadcast_status();
 
-                // --- 智能焦点恢复 ---
-                // 逻辑：如果当前焦点窗口不存在，或者当前焦点窗口在当前标签页不可见，才尝试恢复历史
+                // 2. 智能焦点恢复
+                // 逻辑：如果当前没有焦点窗口，或者焦点窗口由于所在 Tag 被隐藏，则尝试恢复
                 let needs_restore = match &state.focused_window {
-                    Some(f_id) => {
-                        // 检查当前焦点是否在当前标签页
-                        !state
-                            .windows
-                            .iter()
-                            .any(|w| &w.id == f_id && (w.tags & state.focused_tags) != 0)
-                    }
+                    Some(f_id) => !state
+                        .windows
+                        .iter()
+                        .any(|w| &w.id == f_id && (w.tags & state.focused_tags) != 0),
                     None => true,
                 };
 
                 if needs_restore {
-                    if let Some(history_id) = state.tag_focus_history.get(&state.focused_tags) {
-                        state.focused_window = Some(history_id.clone());
+                    // 优先看当前活跃显示器下有没有历史焦点
+                    let history_id = state
+                        .focused_output
+                        .as_ref()
+                        .and_then(|out_id| {
+                            state
+                                .tag_focus_history
+                                .get(&(out_id.clone(), state.focused_tags))
+                        })
+                        .cloned();
+                    if let Some(hid) = history_id {
+                        state.focused_window = Some(hid);
                     } else {
-                        // 如果历史也没有，尝试抓取当前标签页下的第一个窗口
+                        // 实在不行，抓取当前活跃标签页下的任意一个可见窗口
                         state.focused_window = state
                             .windows
                             .iter()
@@ -227,14 +237,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                // B. 显隐控制：只显示属于当前活跃标签的窗口
+                // 3. 显隐控制：遍历所有窗口
                 for w_data in &state.windows {
-                    // 只有拿到 AppId 且不是输入法的窗口，我们才去管它的死活
                     if let Some(ref app_id) = w_data.app_id {
                         if app_id.contains("fcitx") {
-                            continue; // 输入法窗口保持隐身，交给 River 默认处理
+                            continue;
                         }
 
+                        // 只要窗口的标签属于当前正在查看的标签，就显示
                         if (w_data.tags & state.focused_tags) != 0 {
                             w_data.window.show();
                         } else {
@@ -243,10 +253,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                // C. 焦点确认：告诉 River 真正把键盘给谁
+                // 4. 焦点确认：告诉 River 真正把键盘给谁
                 if let Some(f_id) = &state.focused_window {
                     if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
-                        // 只有当窗口真的可见时才请求焦点
                         if (w_data.tags & state.focused_tags) != 0 {
                             if let Some(seat) = &state.main_seat {
                                 seat.focus_window(&w_data.window);
@@ -255,39 +264,38 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                // D. 布局计算：只计算并渲染当前标签的树
-                if let Some(root) = state.layout_roots.get(&state.focused_tags) {
-                    let mut results = Vec::new();
-                    let screen = if let Some(out_data) = state.outputs.values().next() {
-                        out_data.usable_area
-                    } else {
-                        Geometry {
-                            x: 0,
-                            y: 0,
-                            w: state.current_width,
-                            h: state.current_height,
-                        }
-                    };
+                // 5. 【核心修改】布局计算：遍历所有显示器，各算各的树
+                state.last_geometry.clear(); // 清空旧的几何记录，准备重新记录
 
-                    calculate_layout(root, screen, &mut results);
+                // 重点：这里不再用 .next()，而是迭代所有的 outputs
+                for (out_id, out_data) in &state.outputs {
+                    // 获取这个显示器在当前活跃 Tag 下的布局根节点
+                    // 注意：键已经变成了 (ObjectId, u32)
+                    let tree_key = (out_id.clone(), state.focused_tags);
 
-                    state.last_geometry.clear();
-                    for (window, geom) in results {
-                        // 再次检查 ID 确保它是我们记录在案的有效窗口
-                        if let Some(w_info) = state.windows.iter().find(|w| w.id == window.id()) {
-                            if w_info.app_id.is_some() {
-                                state.last_geometry.insert(window.id(), geom);
-                                window.propose_dimensions(geom.w, geom.h);
-                                window.set_tiled(Edges::all());
+                    if let Some(root) = state.layout_roots.get(&tree_key) {
+                        let mut results = Vec::new();
+
+                        // 使用当前显示器真实的可用区域 (包含正确的 x, y 偏移)
+                        calculate_layout(root, out_data.usable_area, &mut results);
+
+                        for (window, geom) in results {
+                            // 校验该窗口是否依然存在
+                            if let Some(w_info) = state.windows.iter().find(|w| w.id == window.id())
+                            {
+                                if w_info.app_id.is_some() {
+                                    state.last_geometry.insert(window.id(), geom);
+                                    window.propose_dimensions(geom.w, geom.h);
+                                    window.set_tiled(Edges::all());
+                                }
                             }
                         }
                     }
                 }
 
-                // --- 激活层级表面默认输出 ---
+                // 6. 后续清理：Waybar 激活与快捷键使能
                 for out_data in state.outputs.values() {
                     if let Some(ls_out) = &out_data.ls_output {
-                        // 在管理事务中正式宣布：这个显示器可以画 Waybar 和壁纸了！
                         ls_out.set_default();
                     }
                 }
@@ -297,35 +305,38 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
-                // 修正点：从哈希表中获取当前活跃标签的布局树
-                if let Some(root) = state.layout_roots.get(&state.focused_tags) {
-                    let mut results = Vec::new();
-                    let screen = if let Some(out_data) = state.outputs.values().next() {
-                        out_data.usable_area
-                    } else {
-                        Geometry {
-                            x: 0,
-                            y: 0,
-                            w: state.current_width,
-                            h: state.current_height,
-                        }
-                    };
+                // 1. 核心逻辑：遍历每一个显示器
+                for (out_id, out_data) in &state.outputs {
+                    // 2. 获取该显示器在当前标签页下的布局树
+                    let tree_key = (out_id.clone(), state.focused_tags);
 
-                    calculate_layout(root, screen, &mut results);
+                    if let Some(root) = state.layout_roots.get(&tree_key) {
+                        let mut results = Vec::new();
 
-                    for (window, geom) in results {
-                        if let Some(w_data) = state.windows.iter_mut().find(|w| w.id == window.id())
-                        {
-                            if w_data.node.is_none() {
-                                w_data.node = Some(window.get_node(qh, ()));
-                            }
-                            if let Some(node) = &w_data.node {
-                                node.set_position(geom.x, geom.y);
-                                node.place_top();
+                        // 3. 计算布局：此时 screen 的 x 坐标如果是副屏，会是 1920 之类的偏移值
+                        calculate_layout(root, out_data.usable_area, &mut results);
+
+                        // 4. 应用坐标到每个窗口的 Render Node
+                        for (window, geom) in results {
+                            if let Some(w_data) =
+                                state.windows.iter_mut().find(|w| w.id == window.id())
+                            {
+                                // 如果窗口还没有渲染节点（Render Node），创建一个
+                                if w_data.node.is_none() {
+                                    w_data.node = Some(window.get_node(qh, ()));
+                                }
+
+                                // 设置绝对坐标并置顶
+                                if let Some(node) = &w_data.node {
+                                    node.set_position(geom.x, geom.y);
+                                    node.place_top();
+                                }
                             }
                         }
                     }
                 }
+
+                // 5. 告诉 River 这一帧渲染指令发送完毕
                 proxy.render_finish();
             }
 
@@ -411,14 +422,18 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
             let id = window.id();
             println!("-> 鼠标点击窗口: {:?}", id);
 
-            // 1. 更新全局焦点
             state.focused_window = Some(id.clone());
 
-            // 2. 关键点：找到窗口所属的 Tag，并同步更新该 Tag 的焦点历史
             if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
-                state.tag_focus_history.insert(w_info.tags, id.clone());
+                state.focused_window = Some(id.clone());
+                // 同步更新当前活跃显示器
+                if let Some(out_id) = &w_info.output {
+                    state.focused_output = Some(out_id.clone());
+                    state
+                        .tag_focus_history
+                        .insert((out_id.clone(), w_info.tags), id.clone());
+                }
             }
-
             proxy.focus_window(&window);
         }
     }
@@ -440,53 +455,66 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
             // 当窗口被关闭（比如在终端里输了 exit）
             WinEvent::Closed => {
                 let id = proxy.id();
-                println!("-> 窗口已关闭: {:?}", id);
-
-                // 1. 查找这个窗口所在的标签
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
                     let win_tag = w_info.tags;
+                    if let Some(out_id) = &w_info.output {
+                        let tree_key = (out_id.clone(), win_tag); // Key 1: 布局树
 
-                    // 2. 从对应标签的树中移除它（智能填充逻辑）
-                    if let Some(root) = state.layout_roots.remove(&win_tag) {
-                        // LayoutNode::remove_at 是你在 layout.rs 里实现的递归删除
-                        if let Some(new_root) = LayoutNode::remove_at(root, &id) {
-                            state.layout_roots.insert(win_tag, new_root);
+                        // 从树中移除
+                        if let Some(root) = state.layout_roots.remove(&tree_key) {
+                            if let Some(new_root) = LayoutNode::remove_at(root, &id) {
+                                state.layout_roots.insert(tree_key.clone(), new_root);
+                            }
                         }
-                    }
 
-                    // 3. 焦点记忆管理
-                    if state.tag_focus_history.get(&win_tag) == Some(&id) {
-                        state.tag_focus_history.remove(&win_tag);
-                        // 如果同标签下还有别的窗口，把焦点记在别人身上
-                        if let Some(other) = state
-                            .windows
-                            .iter()
-                            .find(|w| w.id != id && (w.tags & win_tag) != 0)
-                        {
-                            state.tag_focus_history.insert(win_tag, other.id.clone());
+                        // 焦点记忆管理
+                        let history_key = (out_id.clone(), win_tag); // Key 2: 焦点历史
+
+                        // 使用 Key 2: history_key 查找
+                        if state.tag_focus_history.get(&history_key) == Some(&id) {
+                            state.tag_focus_history.remove(&history_key);
+
+                            // 找接班人：必须是同一个显示器 (out_id) 且同一个标签
+                            if let Some(other) = state.windows.iter().find(|w| {
+                                w.id != id
+                                    && (w.tags & win_tag) != 0
+                                    && w.output.as_ref() == Some(out_id)
+                            }) {
+                                // 使用 Key 2 插入
+                                state
+                                    .tag_focus_history
+                                    .insert(history_key, other.id.clone());
+                            }
                         }
                     }
                 }
-
                 // 4. 从全局扁平列表中移除
                 state.windows.retain(|w| w.id != id);
                 state.last_geometry.remove(&id);
-
                 // 此时不需要做任何事，River 随后会自动发 ManageStart
             }
             WinEvent::AppId { app_id } => {
                 let id = proxy.id();
                 println!("-> 窗口 ID {:?} 获得 AppId: {:?}", id, app_id);
 
-                // 1. 更新内存里的 app_id
+                // 1. 更新内存里的 app_id 并确定归属显示器
+                let mut out_id_to_use = None;
                 if let Some(w_info) = state.windows.iter_mut().find(|w| w.id == id) {
                     w_info.app_id = app_id.clone();
+
+                    // 如果窗口还没分配显示器，就给它当前活跃的显示器
+                    if w_info.output.is_none() {
+                        w_info.output = state
+                            .focused_output
+                            .clone()
+                            .or_else(|| state.outputs.keys().next().cloned());
+                    }
+                    out_id_to_use = w_info.output.clone();
                 }
 
-                // 2. 过滤黑名单：如果是 fcitx5 相关窗口，直接无视，不参与平铺
+                // 2. 过滤黑名单：fcitx 或没有有效显示器则跳过
                 if let Some(ref id_str) = app_id {
                     if id_str.contains("fcitx") {
-                        println!("-> [跳过] 输入法窗口不参与平铺逻辑");
                         return;
                     }
                 } else {
@@ -494,8 +522,13 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     return;
                 }
 
-                // 3. 执行平铺逻辑 (只有从未被平铺过的窗口才执行)
-                // 检查该窗口是否已经存在于任何布局树中
+                let out_id = match out_id_to_use {
+                    Some(o) => o,
+                    None => return, // 还没准备好显示器，先不平铺
+                };
+
+                // 3. 执行平铺逻辑
+                // 检查窗口是否已在任何一棵树里（防止重复插入）
                 let already_tiled = state.layout_roots.values().any(|root| {
                     fn tree_contains(node: &LayoutNode, target: &ObjectId) -> bool {
                         match node {
@@ -515,19 +548,20 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                 if !already_tiled {
                     let current_tag = state.focused_tags;
-                    // 拿到该窗口的数据副本
                     let w_data = state.windows.iter().find(|w| w.id == id).cloned().unwrap();
 
-                    if !state.layout_roots.contains_key(&current_tag) {
-                        // 标签页的第一个窗口，设为根
+                    // 构造元组键：(显示器, 标签)
+                    let tree_key = (out_id.clone(), current_tag);
+
+                    if !state.layout_roots.contains_key(&tree_key) {
                         state
                             .layout_roots
-                            .insert(current_tag, LayoutNode::Window(w_data));
-                    } else if let Some(mut root) = state.layout_roots.remove(&current_tag) {
-                        // 执行 Cosmic 分裂
+                            .insert(tree_key, LayoutNode::Window(w_data));
+                    } else if let Some(mut root) = state.layout_roots.remove(&tree_key) {
+                        // 找到该显示器/标签下的焦点历史，决定切分位置
                         let target_id = state
                             .tag_focus_history
-                            .get(&current_tag)
+                            .get(&tree_key)
                             .cloned()
                             .unwrap_or_else(|| id.clone());
 
@@ -542,13 +576,15 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                         };
 
                         root.insert_at(&target_id, w_data, split);
-                        state.layout_roots.insert(current_tag, root);
+                        state.layout_roots.insert(tree_key, root);
                     }
 
-                    // 4. 关键：更新焦点记忆
-                    // 只有在这里更新，才能确保焦点始终落在“有身份”的正经窗口上
+                    // 4. 更新全局状态
                     state.focused_window = Some(id.clone());
-                    state.tag_focus_history.insert(current_tag, id.clone());
+                    state.focused_output = Some(out_id.clone());
+                    state
+                        .tag_focus_history
+                        .insert((out_id, current_tag), id.clone());
 
                     if let Some(seat) = &state.main_seat {
                         seat.focus_window(proxy);
