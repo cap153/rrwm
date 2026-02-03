@@ -78,6 +78,8 @@ i = { action = "focus", args = ["right_output"] }
 
 # 多显示器之间移动窗口
 [keybindings.alt_ctrl_shift]
+u = { action = "move", args = ["up_output"] }
+e = { action = "move", args = ["down_output"] }
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 

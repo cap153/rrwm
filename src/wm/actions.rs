@@ -23,10 +23,12 @@ pub struct WaybarResponse {
     pub class: String,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum MoveHint {
-    Leftmost,  // 强制出现在最左边
-    Rightmost, // 强制出现在最右边
+    Leftmost,   // 强制出现在最左边
+    Rightmost,  // 强制出现在最右边
+    Topmost,    // 强制出现在最上方
+    Bottommost, // 强制出现在最下方
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,8 @@ impl Action {
                 match arg {
                     "left_output" => Action::MoveToOutput(Direction::Left),
                     "right_output" => Action::MoveToOutput(Direction::Right),
+                    "up_output" => Action::MoveToOutput(Direction::Up),
+                    "down_output" => Action::MoveToOutput(Direction::Down),
                     "left" => Action::Move(Direction::Left),
                     "right" => Action::Move(Direction::Right),
                     "up" => Action::Move(Direction::Up),
@@ -118,21 +122,15 @@ impl AppState {
             None => return,
         };
 
-        // 1. 将所有显示器放入列表
         let mut sorted: Vec<_> = self.outputs.iter().collect();
-
-        // 2. 根据方向动态选择排序轴
         sorted.sort_by_key(|(_, data)| match dir {
             Direction::Left | Direction::Right => data.usable_area.x,
             Direction::Up | Direction::Down => data.usable_area.y,
         });
 
-        // 3. 寻找当前索引并计算下一个索引
         if let Some(pos) = sorted.iter().position(|(id, _)| **id == current_out) {
             let next_idx = match dir {
-                // 向右或向下移动，取下一个索引
                 Direction::Right | Direction::Down => (pos + 1) % sorted.len(),
-                // 向左或向上移动，取上一个索引
                 Direction::Left | Direction::Up => (pos + sorted.len() - 1) % sorted.len(),
             };
 
@@ -143,22 +141,53 @@ impl AppState {
             let (next_id, next_data) = sorted[next_idx];
             let next_id = next_id.clone();
 
+            // 【核心修正】获取目标显示器当前正在查看的标签
+            let next_monitor_tags = next_data.tags;
+
             println!(
-                "-> [显示器焦点] {} 切换至 {} (方向: {:?})",
-                current_out, next_id, dir
+                "-> [跨屏跳转] {} (Tag掩码:{:b}) -> {} (Tag掩码:{:b})",
+                current_out, self.focused_tags, next_id, next_monitor_tags
             );
 
-            // 4. 更新内存并排队执行鼠标瞬移
-            self.focused_output = Some(next_id.clone());
-            let cx = next_data.usable_area.x + (next_data.usable_area.w / 2);
-            let cy = next_data.usable_area.y + (next_data.usable_area.h / 2);
-            self.pending_pointer_warp = Some((cx, cy));
+            // 1. 确定“着陆边缘”
+            let landing_dir = match dir {
+                Direction::Up => Direction::Down,
+                Direction::Down => Direction::Up,
+                Direction::Left => Direction::Right,
+                Direction::Right => Direction::Left,
+            };
 
-            // 5. 恢复该屏幕在该标签下的焦点窗口
-            self.focused_window = self
-                .tag_focus_history
-                .get(&(next_id, self.focused_tags))
-                .cloned();
+            // 2. 【核心修正】使用目标显示器自己的标签构造 Key
+            let tree_key = (next_id.clone(), next_monitor_tags);
+
+            let edge_win = if let Some(root) = self.layout_roots.get(&tree_key) {
+                Some(Self::find_edge_in_tree(root, landing_dir))
+            } else {
+                None
+            };
+
+            // 3. 执行焦点和鼠标瞬移
+            if let Some(win_id) = edge_win {
+                println!("-> [焦点] 锁定目标屏幕边缘窗口: {:?}", win_id);
+                self.focused_window = Some(win_id.clone());
+                self.tag_focus_history.insert(tree_key, win_id.clone());
+
+                if let Some(geom) = self.last_geometry.get(&win_id) {
+                    let cx = geom.x + (geom.w / 2);
+                    let cy = geom.y + (geom.h / 2);
+                    self.pending_pointer_warp = Some((cx, cy));
+                }
+            } else {
+                // 如果目标屏幕是空的，去屏幕中心
+                let cx = next_data.usable_area.x + (next_data.usable_area.w / 2);
+                let cy = next_data.usable_area.y + (next_data.usable_area.h / 2);
+                self.pending_pointer_warp = Some((cx, cy));
+                self.focused_window = None;
+            }
+
+            // 4. 更新全局状态：切换当前活跃显示器，并同步影子标签
+            self.focused_output = Some(next_id);
+            self.focused_tags = next_monitor_tags; // 👈 必须同步这个，否则 Waybar 会显示错误的 Tag
 
             if let Some(wm) = &self.river_wm {
                 wm.manage_dirty();
@@ -167,78 +196,119 @@ impl AppState {
     }
     /// 将窗口从一个物理显示器搬到另一个物理显示器（保持在当前 Tag）
     fn move_window_to_output(&mut self, win_id: &ObjectId, dir: Direction) {
-        // 1. 获取窗口当前归属
-        let (out_id, tags) = match self.windows.iter().find(|w| &w.id == win_id) {
+        // 1. 获取窗口元数据
+        let (old_out_name, win_tags) = match self.windows.iter().find(|w| &w.id == win_id) {
             Some(w) => (w.output.clone(), w.tags),
             None => return,
         };
-        let out_id = match out_id {
-            Some(id) => id,
+        let old_out_name = match old_out_name {
+            Some(n) => n,
             None => return,
         };
 
-        // 2. 寻找目标显示器
+        // 2. 寻找目标显示器 (按轴排序逻辑保持不变)
         let mut sorted: Vec<_> = self.outputs.iter().collect();
-        sorted.sort_by_key(|(_, data)| data.usable_area.x);
+        sorted.sort_by_key(|(_, data)| match dir {
+            Direction::Left | Direction::Right => data.usable_area.x,
+            Direction::Up | Direction::Down => data.usable_area.y,
+        });
 
-        if let Some(pos) = sorted.iter().position(|(id, _)| *id == &out_id) {
+        if let Some(pos) = sorted.iter().position(|(name, _)| **name == old_out_name) {
             let next_idx = match dir {
-                Direction::Right => (pos + 1) % sorted.len(),
-                Direction::Left => (pos + sorted.len() - 1) % sorted.len(),
-                _ => pos,
+                Direction::Right | Direction::Down => (pos + 1) % sorted.len(),
+                Direction::Left | Direction::Up => (pos + sorted.len() - 1) % sorted.len(),
             };
             if next_idx == pos {
                 return;
             }
 
-            let (next_out_id, _) = sorted[next_idx];
-            let next_out_id = next_out_id.clone();
+            let (next_out_name, next_out_data) = sorted[next_idx];
+            let next_out_name = next_out_name.clone();
+            let target_monitor_tags = next_out_data.tags;
+
+            // --- 【核心逻辑】根据方向决定“着陆位置” ---
+            // 向右推 -> 从左边入 (Leftmost)
+            // 向左推 -> 从右边入 (Rightmost)
+            // 向下推 -> 从顶端入 (Topmost)
+            // 向上推 -> 从底端入 (Bottommost)
+            let hint = match dir {
+                Direction::Right => MoveHint::Leftmost,
+                Direction::Left => MoveHint::Rightmost,
+                Direction::Down => MoveHint::Topmost,
+                Direction::Up => MoveHint::Bottommost,
+            };
 
             println!(
-                "-> [搬迁] 窗口 {:?} 从显示器 {:?} 搬至 {:?}",
-                win_id, out_id, next_out_id
+                "-> [跨屏搬运] 窗口由 {} 搬至 {} (位置: {:?})",
+                old_out_name, next_out_name, hint
             );
 
-            // 3. 从旧显示器的 BSP 树中移除
-            let old_key = (out_id.clone(), tags);
+            // 3. 从旧树移除
+            let old_key = (old_out_name.clone(), win_tags);
             if let Some(root) = self.layout_roots.remove(&old_key) {
                 if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
                     self.layout_roots.insert(old_key, new_root);
                 }
             }
 
-            // 4. 更新窗口元数据
+            // 4. 更新元数据
             let mut win_data = None;
             if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
-                w.output = Some(next_out_id.clone());
+                w.output = Some(next_out_name.clone());
+                w.tags = target_monitor_tags;
                 win_data = Some(w.clone());
             }
 
-            // 5. 插入目标显示器的 BSP 树 (当前 Tag)
-            if let Some(w_data) = win_data {
-                let new_key = (next_out_id.clone(), tags);
-
+            // 5. 【修正】执行多向插入
+            if let Some(wd) = win_data {
+                let new_key = (next_out_name.clone(), target_monitor_tags);
                 if let Some(old_root) = self.layout_roots.remove(&new_key) {
-                    let new_root = LayoutNode::Container {
-                        split_type: SplitType::Vertical,
-                        ratio: 0.5,
-                        left_child: Box::new(LayoutNode::Window(w_data)),
-                        right_child: Box::new(old_root),
+                    let new_root = match hint {
+                        MoveHint::Leftmost => LayoutNode::Container {
+                            split_type: SplitType::Vertical,
+                            ratio: 0.5,
+                            left_child: Box::new(LayoutNode::Window(wd)),
+                            right_child: Box::new(old_root),
+                        },
+                        MoveHint::Rightmost => LayoutNode::Container {
+                            split_type: SplitType::Vertical,
+                            ratio: 0.5,
+                            left_child: Box::new(old_root),
+                            right_child: Box::new(LayoutNode::Window(wd)),
+                        },
+                        MoveHint::Topmost => LayoutNode::Container {
+                            split_type: SplitType::Horizontal,
+                            ratio: 0.5,
+                            left_child: Box::new(LayoutNode::Window(wd)),
+                            right_child: Box::new(old_root),
+                        },
+                        MoveHint::Bottommost => LayoutNode::Container {
+                            split_type: SplitType::Horizontal,
+                            ratio: 0.5,
+                            left_child: Box::new(old_root),
+                            right_child: Box::new(LayoutNode::Window(wd)),
+                        },
                     };
-                    self.layout_roots.insert(new_key.clone(), new_root); // 【修正】使用 .clone()
+                    self.layout_roots.insert(new_key.clone(), new_root);
                 } else {
                     self.layout_roots
-                        .insert(new_key.clone(), LayoutNode::Window(w_data)); // 【修正】使用 .clone()
+                        .insert(new_key.clone(), LayoutNode::Window(wd));
                 }
 
-                // 焦点跟随搬迁
-                self.focused_output = Some(next_out_id.clone());
+                // 6. 状态同步
+                self.focused_output = Some(next_out_name);
+                self.focused_tags = target_monitor_tags;
                 self.focused_window = Some(win_id.clone());
-                self.tag_focus_history.insert(new_key, win_id.clone()); // 【修正】使用原件，因为它在后面不需要了
-            }
+                self.tag_focus_history.insert(new_key, win_id.clone());
 
-            if let Some(wm) = &self.river_wm {
-                wm.manage_dirty();
+                if let Some(wm) = &self.river_wm {
+                    wm.manage_dirty();
+                }
+
+                // 鼠标直接跳到目标显示器中心
+                let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
+                let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
+                self.pending_pointer_warp = Some((cx, cy));
             }
         }
     }
@@ -772,6 +842,18 @@ impl AppState {
                     },
                     MoveHint::Rightmost => LayoutNode::Container {
                         split_type: SplitType::Vertical,
+                        ratio: 0.5,
+                        left_child: Box::new(old_root),
+                        right_child: Box::new(LayoutNode::Window(w_data)),
+                    },
+                    MoveHint::Topmost => LayoutNode::Container {
+                        split_type: SplitType::Horizontal,
+                        ratio: 0.5,
+                        left_child: Box::new(LayoutNode::Window(w_data)),
+                        right_child: Box::new(old_root),
+                    },
+                    MoveHint::Bottommost => LayoutNode::Container {
+                        split_type: SplitType::Horizontal,
                         ratio: 0.5,
                         left_child: Box::new(old_root),
                         right_child: Box::new(LayoutNode::Window(w_data)),
