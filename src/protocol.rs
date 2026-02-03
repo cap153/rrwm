@@ -62,13 +62,13 @@ pub mod river_xkb {
 pub mod river_layer_shell {
     pub extern crate wayland_backend;
     pub extern crate wayland_client;
-    
+
     // 它依赖窗口管理里的 output 和 seat
     pub use super::river_wm::{river_output_v1, river_seat_v1};
 
     pub mod __interfaces {
-        pub use wayland_client::protocol::__interfaces::*;
         pub use super::super::river_wm::__interfaces::*;
+        pub use wayland_client::protocol::__interfaces::*;
         wayland_scanner::generate_interfaces!("./protocols/river-layer-shell-v1.xml");
     }
     use self::__interfaces::*;

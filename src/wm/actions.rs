@@ -554,28 +554,27 @@ impl AppState {
                     .ok();
             }
             Action::Focus(dir) => {
-                // 这里恢复你原本的纯 BSP 焦点切换逻辑
                 let mut moved_locally = false;
                 if let Some(f_id) = &self.focused_window {
                     if let Some(new_focus) = self.find_neighbor(f_id, dir) {
                         self.focused_window = Some(new_focus.clone());
-                        // 更新焦点记忆 (ObjectId, u32)
-                        if let Some(out_id) = &self
+                        if let Some(out_id) = self
                             .windows
                             .iter()
                             .find(|w| w.id == new_focus)
                             .and_then(|w| w.output.clone())
                         {
                             self.tag_focus_history
-                                .insert((out_id.clone(), self.focused_tags), new_focus.clone());
+                                .insert((out_id, self.focused_tags), new_focus);
                         }
                         moved_locally = true;
                     }
                 }
                 if !moved_locally {
                     match dir {
-                        Direction::Right => self.cycle_tag(1),
-                        Direction::Left => self.cycle_tag(-1),
+                        // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
+                        Direction::Right => self.cycle_tag(1, dir),
+                        Direction::Left => self.cycle_tag(-1, dir),
                         _ => {}
                     }
                 }
@@ -853,9 +852,40 @@ impl AppState {
             wm.manage_dirty();
         }
     }
-    /// 智能动态流转逻辑
-    fn cycle_tag(&mut self, delta: i32) {
-        // 1. 获取当前活跃显示器
+    /// 递归查找 BSP 树的物理边缘窗口
+    fn find_edge_in_tree(node: &LayoutNode, dir: Direction) -> ObjectId {
+        match node {
+            LayoutNode::Window(w) => w.id.clone(),
+            LayoutNode::Container {
+                split_type,
+                left_child,
+                right_child,
+                ..
+            } => {
+                match (split_type, dir) {
+                    // 如果是垂直分割，找左边缘就进左儿子，找右边缘就进右儿子
+                    (SplitType::Vertical, Direction::Left) => {
+                        Self::find_edge_in_tree(left_child, dir)
+                    }
+                    (SplitType::Vertical, Direction::Right) => {
+                        Self::find_edge_in_tree(right_child, dir)
+                    }
+                    // 如果是水平分割，找上边缘进左(上)儿，找下边缘进右(下)儿
+                    (SplitType::Horizontal, Direction::Up) => {
+                        Self::find_edge_in_tree(left_child, dir)
+                    }
+                    (SplitType::Horizontal, Direction::Down) => {
+                        Self::find_edge_in_tree(right_child, dir)
+                    }
+                    // 如果分割方向和我们要找的方向垂直（例如垂直分割时找顶端），
+                    // 则两边都算顶端，我们默认进右/下侧（通常是最新激活侧）
+                    _ => Self::find_edge_in_tree(right_child, dir),
+                }
+            }
+        }
+    }
+    /// 智能动态流转：增加方向感知和边缘焦点锁定
+    fn cycle_tag(&mut self, delta: i32, dir: Direction) {
         let out_id = match &self.focused_output {
             Some(id) => id.clone(),
             None => return,
@@ -867,8 +897,7 @@ impl AppState {
         };
 
         let current_idx = current_tags.trailing_zeros();
-        let occupied = self.get_occupied_tags(); // 这个可以保持全局，或者按需优化
-
+        let occupied = self.get_occupied_tags();
         let max_occupied_idx = if occupied == 0 {
             0
         } else {
@@ -894,28 +923,59 @@ impl AppState {
 
         if next_mask != current_tags {
             println!(
-                "-> [流转] 显示器 {:?} : Tag {} -> {}",
+                "-> [流转] 显示器 {} : Tag {} -> {}",
                 out_id,
                 current_idx + 1,
                 next_idx + 1
             );
 
-            // 【关键修正】修改显示器自己的真值
             if let Some(out_data) = self.outputs.get_mut(&out_id) {
                 out_data.tags = next_mask;
-                // 同步影子变量
                 self.focused_tags = next_mask;
+            }
+
+            // --- 基于树的边缘焦点重定向 ---
+            let tree_key = (out_id.clone(), next_mask);
+            let edge_win = if let Some(root) = self.layout_roots.get(&tree_key) {
+                // 如果向右切(Direction::Right)，进入新页面要找【左】边缘
+                // 如果向左切(Direction::Left)，进入新页面要找【右】边缘
+                let look_dir = if dir == Direction::Right {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                Some(Self::find_edge_in_tree(root, look_dir))
+            } else {
+                None
+            };
+
+            if let Some(win_id) = edge_win {
+                println!("-> [焦点] 进入新标签，锁定物理边缘窗口: {:?}", win_id);
+                self.focused_window = Some(win_id.clone());
+                self.tag_focus_history.insert(tree_key, win_id);
+            } else {
+                self.focused_window = None;
             }
         }
     }
 
     /// 邻居查找，严格方向判定
+    /// 邻居查找：增加显示器隔离判定
     fn find_neighbor(&self, current_id: &ObjectId, dir: Direction) -> Option<ObjectId> {
+        // 1. 先拿到当前聚焦窗口的元数据，确定它属于哪个显示器
+        let current_w_data = self.windows.iter().find(|w| &w.id == current_id)?;
+        let current_out_name = &current_w_data.output;
+
         let cur_geo = self.last_geometry.get(current_id)?;
 
+        // 地理围栏：只在同一个显示器内寻找邻居
         self.windows
             .iter()
-            .filter(|w| &w.id != current_id && (w.tags & self.focused_tags) != 0)
+            .filter(|w| {
+                &w.id != current_id
+                    && (w.tags & self.focused_tags) != 0
+                    && &w.output == current_out_name
+            })
             .filter_map(|w| {
                 let g = self.last_geometry.get(&w.id)?;
 
@@ -931,19 +991,17 @@ impl AppState {
                     return None;
                 }
 
-                // 计算投影重叠度（判定它们是否“对得齐”）
+                // 计算投影重叠度
                 let overlap = match dir {
                     Direction::Left | Direction::Right => {
-                        // 检查垂直方向是否有交叉
                         let over = cur_geo.y.max(g.y) < (cur_geo.y + cur_geo.h).min(g.y + g.h);
                         if over {
                             1000
                         } else {
                             0
-                        } // 有重叠给予极高权重
+                        }
                     }
                     Direction::Up | Direction::Down => {
-                        // 检查水平方向是否有交叉
                         let over = cur_geo.x.max(g.x) < (cur_geo.x + cur_geo.w).min(g.x + g.w);
                         if over {
                             1000
@@ -961,7 +1019,6 @@ impl AppState {
                     Direction::Down => g.y - (cur_geo.y + cur_geo.h),
                 };
 
-                // 分数：重叠度越高、距离越近，分数越低（越优）
                 let score = dist - overlap;
                 Some((w.id.clone(), score))
             })
