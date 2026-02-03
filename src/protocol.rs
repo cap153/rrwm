@@ -68,7 +68,6 @@ pub mod river_layer_shell {
 
     pub mod __interfaces {
         pub use super::super::river_wm::__interfaces::*;
-        pub use wayland_client::protocol::__interfaces::*;
         wayland_scanner::generate_interfaces!("./protocols/river-layer-shell-v1.xml");
     }
     use self::__interfaces::*;

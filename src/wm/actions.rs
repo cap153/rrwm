@@ -786,26 +786,83 @@ impl AppState {
 
         // 5. 状态同步
         self.tag_focus_history.insert(new_key, win_id.clone());
+
         if follow {
-            self.focused_tags = target_mask;
+            // 我们之前在函数开头已经拿到了 out_id (String 类型)
+            if let Some(out_data) = self.outputs.get_mut(&out_id) {
+                println!(
+                    "-> [跟随] 显示器 {} 视角切换至新标签掩码: {:b}",
+                    out_id, target_mask
+                );
+                out_data.tags = target_mask;
+
+                // 同步给影子变量，确保后续渲染和状态栏逻辑一致
+                self.focused_tags = target_mask;
+            }
+
             self.focused_window = Some(win_id.clone());
+            // 确保当前活跃显示器也是这一个
+            self.focused_output = Some(out_id);
         }
         if let Some(wm) = &self.river_wm {
             wm.manage_dirty();
         }
     }
 
-    /// 相对标签移动（向左/向右一个 Tag）
+    /// 相对标签移动（向左/向右一个 Tag）（增加动态边界感应）
     fn move_window_relative(&mut self, win_id: &ObjectId, delta: i32, hint: MoveHint) {
-        let mut current_idx = 0;
-        for i in 0..9 {
-            if (self.focused_tags & (1 << i)) != 0 {
-                current_idx = i as i32;
-                break;
+        // 1. 获取该窗口所属显示器及其名字
+        let out_id = match self
+            .windows
+            .iter()
+            .find(|w| &w.id == win_id)
+            .and_then(|w| w.output.clone())
+        {
+            Some(id) => id,
+            None => return,
+        };
+
+        // 2. 获取当前显示器的标签状态
+        let current_tags = self.outputs.get(&out_id).map(|d| d.tags).unwrap_or(1);
+        let current_idx = current_tags.trailing_zeros();
+
+        // 3. 计算该显示器的动态边界
+        let occupied = self.get_occupied_tags_for_monitor(&out_id);
+        let max_occupied_idx = if occupied == 0 {
+            0
+        } else {
+            32 - occupied.leading_zeros() - 1
+        };
+
+        // 边界 = 最远有窗口的 Tag 索引 + 1 (留出一个空位)
+        // 限制在 0-31 之间
+        let bound_idx = (max_occupied_idx + 1).min(31);
+
+        // 4. 计算目标索引
+        let next_idx = if delta > 0 {
+            // 向右移：超过边界回到 Tag 1
+            if current_idx >= bound_idx {
+                0
+            } else {
+                current_idx + 1
             }
-        }
-        let next_idx = (current_idx + delta).rem_euclid(9) as u32;
+        } else {
+            // 向左移：从 Tag 1 跨越则跳到边界空位
+            if current_idx == 0 {
+                bound_idx
+            } else {
+                current_idx - 1
+            }
+        };
+
         let next_mask = 1 << next_idx;
+
+        // 5. 执行搬迁，且视角跟随 (follow = true)
+        println!(
+            "-> [跨标搬运] 窗口由 Tag {} 移至 Tag {}",
+            current_idx + 1,
+            next_idx + 1
+        );
         self.move_window_to_tag(win_id, next_mask, true, hint);
     }
 
@@ -851,6 +908,16 @@ impl AppState {
         if let Some(wm) = &self.river_wm {
             wm.manage_dirty();
         }
+    }
+    /// 获取特定显示器上哪些标签有窗口
+    pub fn get_occupied_tags_for_monitor(&self, out_name: &str) -> u32 {
+        let mut mask = 0u32;
+        for w in &self.windows {
+            if w.output.as_deref() == Some(out_name) && w.app_id.is_some() {
+                mask |= w.tags;
+            }
+        }
+        mask
     }
     /// 递归查找 BSP 树的物理边缘窗口
     fn find_edge_in_tree(node: &LayoutNode, dir: Direction) -> ObjectId {
