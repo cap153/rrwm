@@ -6,7 +6,6 @@ use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
 use crate::protocol::river_input::river_input_device_v1::{
     Event as InputDeviceEvent, RiverInputDeviceV1,
 };
-
 use crate::protocol::river_input::river_input_manager_v1::RiverInputManagerV1;
 use crate::protocol::river_layer_shell::river_layer_shell_output_v1::{
     Event as LayerOutEvent, RiverLayerShellOutputV1,
@@ -16,6 +15,7 @@ use crate::protocol::river_layer_shell::river_layer_shell_seat_v1::{
 };
 use crate::protocol::river_layer_shell::river_layer_shell_v1::RiverLayerShellV1;
 use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
+use crate::protocol::river_wm::river_seat_v1::Event as SeatEvent;
 use crate::protocol::river_wm::{
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
@@ -417,29 +417,53 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverSeatV1,
-        event: crate::protocol::river_wm::river_seat_v1::Event,
+        event: SeatEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river_wm::river_seat_v1::Event as SeatEvent;
-        if let SeatEvent::WindowInteraction { window } = event {
-            let id = window.id();
-            println!("-> 鼠标点击窗口: {:?}", id);
-
-            state.focused_window = Some(id.clone());
-
-            if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
-                state.focused_window = Some(id.clone());
-                // 同步更新当前活跃显示器
-                if let Some(out_id) = &w_info.output {
-                    state.focused_output = Some(out_id.clone());
-                    state
-                        .tag_focus_history
-                        .insert((out_id.clone(), w_info.tags), id.clone());
+        match event {
+            // --- 新增：处理鼠标坐标变化，实现焦点随鼠标跨屏 ---
+            SeatEvent::PointerPosition { x, y } => {
+                let mut found_name = None;
+                // 遍历所有显示器，检查坐标落在谁的领地里
+                for (name, data) in &state.outputs {
+                    let g = data.usable_area;
+                    // 判定坐标 (x, y) 是否在显示器的逻辑矩形内
+                    if x >= g.x && x < g.x + g.w && y >= g.y && y < g.y + g.h {
+                        found_name = Some(name.clone());
+                        break;
+                    }
+                }
+                if let Some(name) = found_name {
+                    // 只有当显示器真的变了，才执行切换，避免日志刷屏
+                    if state.focused_output.as_ref() != Some(&name) {
+                        println!("-> [焦点] 鼠标跨越物理边界，自动锁定显示器: {}", name);
+                        state.focused_output = Some(name);
+                        if let Some(wm) = &state.river_wm {
+                            wm.manage_dirty();
+                        }
+                    }
                 }
             }
-            proxy.focus_window(&window);
+
+            SeatEvent::WindowInteraction { window } => {
+                let id = window.id();
+                println!("-> 鼠标点击窗口: {:?}", id);
+                state.focused_window = Some(id.clone());
+                if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
+                    state.focused_window = Some(id.clone());
+                    // 同步更新当前活跃显示器
+                    if let Some(out_id) = &w_info.output {
+                        state.focused_output = Some(out_id.clone());
+                        state
+                            .tag_focus_history
+                            .insert((out_id.clone(), w_info.tags), id.clone());
+                    }
+                }
+                proxy.focus_window(&window);
+            }
+            _ => (),
         }
     }
 }
