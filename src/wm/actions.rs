@@ -682,7 +682,7 @@ impl AppState {
         } else {
             32 - self.focused_tags.leading_zeros() - 1
         };
-        let visual_bound = (max_occupied_idx.max(focused_idx) + 1).min(8);
+        let visual_bound = (max_occupied_idx.max(focused_idx) + 1).min(31);
 
         for i in 0..=visual_bound {
             let mask = 1 << i;
@@ -692,11 +692,11 @@ impl AppState {
                 .unwrap_or_else(|| (i + 1).to_string());
 
             let styled_icon = if (self.focused_tags & mask) != 0 {
-                format!("<span color='#bd93f9' underline='single'>{}</span>", icon)
+                format!("<span color='#bd93f9'>{}</span>", icon)
             } else if (occupied & mask) != 0 {
-                format!("<span color='#ffffff'>{}</span>", icon)
+                format!("<span color='#6C7086'>{}</span>", icon)
             } else {
-                format!("<span color='#666666'>{}</span>", icon)
+                format!("<span color='#313244'>{}</span>", icon)
             };
             tag_strings.push(styled_icon);
         }
