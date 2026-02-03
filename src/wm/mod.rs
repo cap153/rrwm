@@ -122,6 +122,8 @@ pub struct AppState {
     pub focused_output: Option<String>,
     pub output_id_to_name: HashMap<ObjectId, String>,
     pub pending_pointer_warp: Option<(i32, i32)>,
+    pub last_sent_json: String,
+    pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -362,6 +364,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
             WmEvent::Output { id } => {
                 println!("-> 发现新物理输出接口: {:?}", id.id());
+                // --- 绑定 LayerShell 输出对象 ---
+                if let Some(ls_mgr) = &state.layer_shell_manager {
+                    // 创建监听对象并放入暂存区
+                    let ls_out = ls_mgr.get_output(&id, qh, ());
+                    state.anonymous_ls_outputs.push(ls_out);
+                }
             }
             _ => {}
         }
@@ -372,6 +380,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 }
 
 // --- 3. 监听 RiverOutputV1 (分辨率) ---
+// src/wm/mod.rs
+
 impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -381,18 +391,17 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
         if let OutEvent::Dimensions { width, height } = event {
-            // 1. 通过 ID 找到显示器名字
+            // 通过 ID 反查名字
             if let Some(name) = state.output_id_to_name.get(&proxy.id()).cloned() {
                 if let Some(data) = state.outputs.get_mut(&name) {
-                    println!(
-                        "-> [硬件] 显示器 {} 报告逻辑分辨率: {}x{}",
-                        name, width, height
-                    );
+                    // println!("-> [硬件] {} 报告分辨率: {}x{}", name, width, height);
                     data.width = width;
                     data.height = height;
 
-                    if data.usable_area.w == 0 {
+                    // 保护逻辑：只更新宽高，绝对不重置 actions.rs 算好的 x 和 y
+                    if data.usable_area.w == 0 && data.usable_area.h == 0 {
                         data.usable_area = Geometry {
                             x: 0,
                             y: 0,
@@ -760,10 +769,12 @@ impl Dispatch<RiverXkbKeymapV1, ()> for AppState {
     }
 }
 
+// src/wm/mod.rs
+
 impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
-        _proxy: &RiverLayerShellOutputV1,
+        proxy: &RiverLayerShellOutputV1,
         event: LayerOutEvent,
         _: &(),
         _: &Connection,
@@ -776,16 +787,45 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
                 width,
                 height,
             } => {
-                println!("-> 可用区域更新: {}x{} @ {},{}", width, height, x, y);
-                state.current_width = width;
-                state.current_height = height;
-                if let Some(out_data) = state.outputs.values_mut().next() {
-                    out_data.usable_area = Geometry {
-                        x,
-                        y,
-                        w: width,
-                        h: height,
-                    };
+                // 【核心逻辑】坐标匹配：看看这个预留区域落在了哪个显示器的领地里
+                let mut matched_name = None;
+
+                for (name, out_data) in &state.outputs {
+                    // 只要这个预留区域的起始点 (x, y) 落在显示器的物理边界内，就是它了！
+                    // 这里的 10 是为了容错处理
+                    if x >= out_data.usable_area.x - 10
+                        && x < out_data.usable_area.x + 1920
+                        && y >= out_data.usable_area.y - 10
+                        && y < out_data.usable_area.y + 1920
+                    {
+                        matched_name = Some(name.clone());
+                        break;
+                    }
+                }
+
+                if let Some(name) = matched_name {
+                    if let Some(out_data) = state.outputs.get_mut(&name) {
+                        println!(
+                            "-> [Bar占位] 显示器 {} 预留空间: {}x{} @ {},{}",
+                            name, width, height, x, y
+                        );
+
+                        // 更新可用区域：这会让窗口避开 Waybar
+                        out_data.usable_area = Geometry {
+                            x,
+                            y,
+                            w: width,
+                            h: height,
+                        };
+
+                        // 关联对象：把这个 ls_output 存进对应的 OutputData 里（供 ManageStart set_default 用）
+                        out_data.ls_output = Some(proxy.clone());
+
+                        // 强行刷新布局
+                        if let Some(wm) = &state.river_wm {
+                            wm.manage_dirty();
+                        }
+                    }
                 }
             }
         }

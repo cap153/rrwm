@@ -67,6 +67,8 @@ fn main() {
         focused_output: None,
         pending_pointer_warp: None,
         output_id_to_name: HashMap::new(),
+        last_sent_json: String::new(),
+        anonymous_ls_outputs: Vec::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

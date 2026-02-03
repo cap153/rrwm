@@ -3,7 +3,6 @@ use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV
 use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
 use serde::Serialize;
-use std::io::Write;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
 use wayland_client::{Proxy, QueueHandle};
@@ -662,25 +661,8 @@ impl AppState {
         }
     }
 
-    /// 核心：处理 IPC 连接（迎接新听众）
-    pub fn handle_ipc_connections(&mut self) {
-        if let Some(ref listener) = self.ipc_listener {
-            // 尝试接受新连接（因为是非阻塞的，所以没连接时会立刻报错并跳过）
-            while let Ok((mut stream, _)) = listener.accept() {
-                println!("-> IPC: 发现新听众 (Bar/Script)");
-                // 刚连进来时，先给它发一个当前状态，别让人家等着
-                let _ = self.send_status_to_stream(&mut stream);
-                self.ipc_clients.push(stream);
-            }
-        }
-    }
-
-    /// 核心：向所有听众广播状态
-    pub fn broadcast_status(&mut self) {
-        if self.ipc_clients.is_empty() {
-            return;
-        }
-
+    /// 辅助：统一生成给 Waybar 的状态数据
+    fn get_waybar_response_json(&self) -> String {
         let occupied = self.get_occupied_tags();
         let user_icons = self
             .config
@@ -689,26 +671,19 @@ impl AppState {
             .and_then(|a| a.tag_icons.as_ref());
         let mut tag_strings = Vec::new();
 
-        // --- 核心算法：计算动态显示的截止点 ---
-        // 1. 找到最大的“被占用”标签索引 (0-31)
-        // 32 - leading_zeros 得到的是位数，减 1 才是索引
+        // 计算显示范围
         let max_occupied_idx = if occupied == 0 {
             0
         } else {
             32 - occupied.leading_zeros() - 1
         };
-
-        // 2. 找到当前“被聚焦”标签索引
         let focused_idx = if self.focused_tags == 0 {
             0
         } else {
             32 - self.focused_tags.leading_zeros() - 1
         };
-
-        // 3. 决定显示范围：取两者的最大值，再 +1 (保留一个空位作为缓冲)
         let visual_bound = (max_occupied_idx.max(focused_idx) + 1).min(8);
 
-        // --- 循环生成 ---
         for i in 0..=visual_bound {
             let mask = 1 << i;
             let icon = user_icons
@@ -732,26 +707,43 @@ impl AppState {
             class: "rrwm-status".to_string(),
         };
 
-        if let Ok(mut json) = serde_json::to_string(&response) {
-            json.push('\n');
-            self.ipc_clients
-                .retain_mut(|client| std::io::Write::write_all(client, json.as_bytes()).is_ok());
+        serde_json::to_string(&response).unwrap_or_default()
+    }
+
+    /// 核心：处理 IPC 连接
+    pub fn handle_ipc_connections(&mut self) {
+        if let Some(ref listener) = self.ipc_listener {
+            while let Ok((mut stream, _)) = listener.accept() {
+                // println!("-> IPC: 发现新听众 (Bar/Script)");
+                // 【修正】新听众进来，立刻发送当前“精装修”后的状态
+                let mut json = self.get_waybar_response_json();
+                json.push('\n');
+                let _ = std::io::Write::write_all(&mut stream, json.as_bytes());
+
+                self.ipc_clients.push(stream);
+            }
         }
     }
 
-    // 内部辅助：向单个流发送状态
-    fn send_status_to_stream(
-        &self,
-        stream: &mut std::os::unix::net::UnixStream,
-    ) -> std::io::Result<()> {
-        let status = RrwmStatus {
-            focused_tags: self.focused_tags,
-            occupied_tags: self.get_occupied_tags(),
-            active_window: self.get_active_window_title(),
-        };
-        let mut json = serde_json::to_string(&status).unwrap();
-        json.push('\n');
-        stream.write_all(json.as_bytes())
+    /// 核心：向所有听众广播状态（增加缓存拦截）
+    pub fn broadcast_status(&mut self) {
+        if self.ipc_clients.is_empty() {
+            return;
+        }
+
+        let json_content = self.get_waybar_response_json();
+
+        // 【节流】只有内容变化时才真正写入 Socket
+        if json_content == self.last_sent_json {
+            return;
+        }
+        self.last_sent_json = json_content.clone();
+
+        let mut packet = json_content;
+        packet.push('\n');
+
+        self.ipc_clients
+            .retain_mut(|client| std::io::Write::write_all(client, packet.as_bytes()).is_ok());
     }
 
     /// 计算哪些标签有窗口
