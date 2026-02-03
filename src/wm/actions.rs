@@ -1,12 +1,12 @@
 // src/wm/actions.rs
 use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
-use crate::wm::layout::{Direction, LayoutNode, SplitType}; // 修复点：引入布局相关的类型
+use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
 use serde::Serialize;
 use std::io::Write;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
-use wayland_client::QueueHandle;
+use wayland_client::{Proxy, QueueHandle};
 
 // 定义发送给 Bar 的状态数据包
 #[derive(Serialize, Clone)]
@@ -112,32 +112,51 @@ impl Action {
 impl AppState {
     fn cycle_output_focus(&mut self, dir: Direction) {
         let current_out = match &self.focused_output {
-            Some(id) => id,
+            Some(id) => id.clone(),
             None => return,
         };
 
-        // 按物理坐标 X 排序显示器
+        // 1. 将所有显示器按 X 坐标排序，确定物理上的左右顺序
         let mut sorted: Vec<_> = self.outputs.iter().collect();
         sorted.sort_by_key(|(_, data)| data.usable_area.x);
 
-        if let Some(pos) = sorted.iter().position(|(id, _)| *id == current_out) {
+        if let Some(pos) = sorted.iter().position(|(id, _)| **id == current_out) {
             let next_idx = match dir {
                 Direction::Right => (pos + 1) % sorted.len(),
                 Direction::Left => (pos + sorted.len() - 1) % sorted.len(),
                 _ => pos,
             };
 
-            let (next_id, _) = sorted[next_idx];
-            println!("-> [显示器焦点] 从 {:?} 切换至 {:?}", current_out, next_id);
+            if next_idx == pos {
+                return;
+            } // 如果只有一个显示器，就不动
 
+            let (next_id, next_data) = sorted[next_idx];
+            let next_id = next_id.clone();
+
+            println!(
+                "-> [显示器焦点] 切换至 {:?} (坐标: {},{})",
+                next_id, next_data.usable_area.x, next_data.usable_area.y
+            );
+
+            // 2. 更新内存里的活跃显示器 ID
             self.focused_output = Some(next_id.clone());
 
-            // 恢复该显示器在当前 Tag 下的历史焦点窗口
+            // 3. 【核心修改】计算目标显示器的中心点，并加入瞬移排队
+            // 使用 next_data.usable_area，这已经是考虑了旋转和缩放后的逻辑坐标
+            let cx = next_data.usable_area.x + (next_data.usable_area.w / 2);
+            let cy = next_data.usable_area.y + (next_data.usable_area.h / 2);
+
+            println!("-> [排队] 准备将鼠标瞬移至新显示器中心: {},{}", cx, cy);
+            self.pending_pointer_warp = Some((cx, cy));
+
+            // 4. 恢复该显示器在当前 Tag 下的历史焦点窗口
             self.focused_window = self
                 .tag_focus_history
-                .get(&(next_id.clone(), self.focused_tags))
+                .get(&(next_id, self.focused_tags))
                 .cloned();
 
+            // 5. 触发 River 的管理序列，让 mod.rs 有机会执行瞬移
             if let Some(wm) = &self.river_wm {
                 wm.manage_dirty();
             }
@@ -228,54 +247,86 @@ impl AppState {
 
         let config_obj = mgr.create_configuration(serial, qh, ());
 
-        // 存储最终计算结果的结构
+        // 存储最终计算结果的临时结构
         struct FinalConfig {
+            name: String,
+            id: ObjectId,
             x: i32,
             y: i32,
+            w: i32,
+            h: i32,
             scale: f64,
             transform: Transform,
             mode: Option<ZwlrOutputModeV1>,
         }
 
-        let mut calculated: std::collections::HashMap<String, FinalConfig> =
-            std::collections::HashMap::new();
+        let mut calculated: Vec<FinalConfig> = Vec::new();
         let mut cursor_x = 0;
+        let mut target_output_name: Option<String> = None;
+        let mut startup_focus_found = false;
 
-        println!("-> 正在计算显示器布局...");
+        println!("-> 正在计算多显示器独立排布 (基于名称索引)...");
 
-        // --- 第一轮：处理所有“非镜像”的显示器 ---
+        // 【关键】每一轮配置开始前，清空旧的 ID 映射，因为 apply 后 ID 会变
+        self.output_id_to_name.clear();
+
+        // --- 第一轮：计算几何数据与名字映射 ---
         for head in &self.heads {
-            let cfg = self.config.output.as_ref().and_then(|m| m.get(&head.name));
+            let name = head.name.clone();
+            let cfg = self.config.output.as_ref().and_then(|m| m.get(&name));
 
-            // 如果 mirror 设为了某个名字，说明它是从属，第一轮先跳过
-            if let Some(m_target) = cfg.and_then(|c| c.mirror.as_ref()) {
-                if m_target != "false" {
-                    continue;
-                }
-            }
+            // 建立桥梁：让 mod.rs 能通过 ID 找到这个名字
+            self.output_id_to_name.insert(head.obj.id(), name.clone());
 
-            // A. 确定缩放和模式（分辨率）
-            let scale = cfg
-                .and_then(|c| c.scale.as_ref())
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(1.0);
-            let mut target_mode = None;
-            let mut phys_w = 1920;
-
-            if let Some(mode_str) = cfg.and_then(|c| c.mode.as_ref()) {
-                if let Some((w, h, r)) = Self::parse_mode_string(mode_str) {
-                    if let Some(m) = head
-                        .modes
-                        .iter()
-                        .find(|m| m.width == w && m.height == h && (r == 0 || m.refresh == r))
-                    {
-                        target_mode = Some(m.obj.clone());
-                        phys_w = m.width;
+            // 1. 处理启动焦点配置
+            if let Some(c) = cfg {
+                if c.focus_at_startup.as_deref() == Some("true") {
+                    if !startup_focus_found {
+                        target_output_name = Some(name.clone());
+                        startup_focus_found = true;
+                        println!("   [配置] 发现启动焦点显示器: {}", name);
+                    } else {
+                        println!(
+                            "   警告: 多个显示器配置了 focus-at-startup，将出现焦点随机事件！"
+                        );
                     }
                 }
             }
 
-            // B. 确定坐标
+            // 2. 初始化显示器的标签 (使用名字查找，解决 E0277)
+            if let Some(out_data) = self.outputs.get_mut(&name) {
+                out_data.tags = 1;
+                out_data.base_tag = 1;
+            }
+
+            // 3. 计算几何
+            let scale = cfg
+                .and_then(|c| c.scale.as_ref())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let (log_w, target_mode) = self.get_output_geometry(head, cfg, scale);
+            let transform = Self::parse_transform(cfg);
+
+            // 4. 计算逻辑高度 (用于后续计算鼠标中心点)
+            // 我们需要拿到物理宽高再除以缩放
+            let (phys_w, phys_h) = if let Some(m) = &target_mode {
+                head.modes
+                    .iter()
+                    .find(|mi| mi.obj.id() == m.id())
+                    .map(|mi| (mi.width, mi.height))
+                    .unwrap_or((1920, 1080))
+            } else {
+                (1920, 1080)
+            };
+
+            let log_h = match transform {
+                Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270 => {
+                    (phys_w as f64 / scale).ceil() as i32
+                }
+                _ => (phys_h as f64 / scale).ceil() as i32,
+            };
+
+            // 5. 确定坐标
             let (x, y) = if let Some(pos) = cfg.and_then(|c| c.position.as_ref()) {
                 (pos.x.parse().unwrap_or(0), pos.y.parse().unwrap_or(0))
             } else {
@@ -283,81 +334,114 @@ impl AppState {
                 (x, 0)
             };
 
-            let log_w = (phys_w as f64 / scale).ceil() as i32;
+            calculated.push(FinalConfig {
+                name: name.clone(),
+                id: head.obj.id(),
+                x,
+                y,
+                w: log_w,
+                h: log_h,
+                scale,
+                transform,
+                mode: target_mode,
+            });
 
-            calculated.insert(
-                head.name.clone(),
-                FinalConfig {
-                    x,
-                    y,
-                    scale,
-                    transform: Self::parse_transform(cfg),
-                    mode: target_mode,
-                },
-            );
-
-            // 关键：非镜像显示器会推动游标，防止下一个显示器重叠
-            cursor_x = x + log_w;
-            println!(
-                "   [独立] {} 放置于 {},{} (逻辑宽度: {})",
-                head.name, x, y, log_w
-            );
+            cursor_x = cursor_x.max(x + log_w);
         }
 
-        // --- 第二轮：处理“镜像”显示器 ---
-        for head in &self.heads {
-            if calculated.contains_key(&head.name) {
-                continue;
-            }
-
-            let cfg = self.config.output.as_ref().and_then(|m| m.get(&head.name));
-            if let Some(m_target) = cfg.and_then(|c| c.mirror.as_ref()) {
-                // 查找目标的坐标
-                if let Some(target_cfg) = calculated.get(m_target) {
-                    let tx = target_cfg.x;
-                    let ty = target_cfg.y;
-
-                    let scale = cfg
-                        .and_then(|c| c.scale.as_ref())
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(1.0);
-
-                    calculated.insert(
-                        head.name.clone(),
-                        FinalConfig {
-                            x: tx,
-                            y: ty,
-                            scale,
-                            transform: Self::parse_transform(cfg),
-                            mode: None, // 镜像通常跟随目标模式，这里可以设为 None 让系统选
-                        },
-                    );
-                    println!(
-                        "   [镜像] {} 复制坐标自 {} -> {},{}",
-                        head.name, m_target, tx, ty
-                    );
-                }
-            }
-        }
-
-        // --- 第三轮：向 River 提交 ---
-        for head in &self.heads {
-            let head_config = config_obj.enable_head(&head.obj, qh, ());
-            if let Some(res) = calculated.get(&head.name) {
+        // --- 第二轮：向 River 提交物理配置并更新内存 ---
+        for res in &calculated {
+            if let Some(head_info) = self.heads.iter().find(|h| h.obj.id() == res.id) {
+                let head_config = config_obj.enable_head(&head_info.obj, qh, ());
                 head_config.set_position(res.x, res.y);
                 head_config.set_scale(res.scale);
                 head_config.set_transform(res.transform);
                 if let Some(m) = &res.mode {
                     head_config.set_mode(m);
                 }
-            } else {
-                // 保底：没配的也排在最右边
-                head_config.set_position(cursor_x, 0);
-                cursor_x += 1920;
+
+                // 【修正】使用名字查找更新，确保 usable_area 固化了算好的坐标和对调后的宽高
+                if let Some(out_data) = self.outputs.get_mut(&res.name) {
+                    out_data.usable_area = Geometry {
+                        x: res.x,
+                        y: res.y,
+                        w: res.w,
+                        h: res.h,
+                    };
+                }
             }
         }
 
         config_obj.apply();
+
+        // --- 第三轮：准备物理焦点生效 (Pointer Warp) ---
+        let final_target_name =
+            target_output_name.or_else(|| calculated.first().map(|c| c.name.clone()));
+
+        if let Some(t_name) = final_target_name {
+            if let Some(target_res) = calculated.iter().find(|c| c.name == t_name) {
+                let center_x = target_res.x + (target_res.w / 2);
+                let center_y = target_res.y + (target_res.h / 2);
+
+                println!(
+                    "-> [排队] 准备在安全时刻瞬移鼠标至 {} 中心: {},{}",
+                    t_name, center_x, center_y
+                );
+                self.pending_pointer_warp = Some((center_x, center_y));
+                self.focused_output = Some(t_name);
+            }
+        }
+    }
+
+    fn get_output_geometry(
+        &self,
+        head_info: &crate::wm::HeadInfo,
+        cfg: Option<&crate::config::OutputConfig>,
+        scale: f64,
+    ) -> (i32, Option<ZwlrOutputModeV1>) {
+        let mut target_mode = None;
+        let mut phys_w = 1920;
+        let mut phys_h = 1080;
+
+        if let Some(mode_str) = cfg.and_then(|c| c.mode.as_ref()) {
+            if let Some((w, h, r)) = Self::parse_mode_string(mode_str) {
+                if let Some(m) = head_info
+                    .modes
+                    .iter()
+                    .find(|m| m.width == w && m.height == h && (r == 0 || m.refresh == r))
+                {
+                    target_mode = Some(m.obj.clone());
+                    phys_w = m.width;
+                    phys_h = m.height;
+                }
+            }
+        }
+
+        // 如果没配，从当前模式里拿物理宽高
+        if target_mode.is_none() {
+            if let Some(curr) = &head_info.current_mode {
+                if let Some(m) = head_info.modes.iter().find(|m| &m.obj.id() == curr) {
+                    phys_w = m.width;
+                    phys_h = m.height;
+                }
+            }
+        }
+
+        let transform = Self::parse_transform(cfg);
+
+        // 【关键修正】根据旋转角度对调物理宽高
+        let (log_w, _log_h) = match transform {
+            Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270 => (
+                (phys_h as f64 / scale).ceil() as i32,
+                (phys_w as f64 / scale).ceil() as i32,
+            ),
+            _ => (
+                (phys_w as f64 / scale).ceil() as i32,
+                (phys_h as f64 / scale).ceil() as i32,
+            ),
+        };
+
+        (log_w, target_mode)
     }
 
     /// 辅助：解析 "3840x2160@60.000"
@@ -414,9 +498,18 @@ impl AppState {
             }
             // --- 标签切换逻辑 ---
             Action::FocusTag(mask) => {
-                println!("-> 切换标签掩码为: {:b}", mask);
-                self.focused_tags = mask;
-                // 注意：修改 state 后，River 随后会自动触发 ManageStart 重新渲染
+                // 逻辑：修改“当前活跃显示器”的真值
+                if let Some(out_id) = &self.focused_output {
+                    if let Some(out_data) = self.outputs.get_mut(out_id) {
+                        println!("-> [动作] 切换显示器 {:?} 的标签至: {:b}", out_id, mask);
+                        out_data.tags = mask;
+                        // 同步影子变量，确保本次渲染周期内逻辑一致
+                        self.focused_tags = mask;
+                    }
+                }
+                if let Some(wm) = &self.river_wm {
+                    wm.manage_dirty();
+                }
             }
 
             // --- 编号移动 (Super+Shift+数字) ---
@@ -762,57 +855,57 @@ impl AppState {
     }
     /// 智能动态流转逻辑
     fn cycle_tag(&mut self, delta: i32) {
-        // 1. 获取当前 Tag 的索引 (0-31)
-        // trailing_zeros() 对于 0001 返回 0，对于 0010 返回 1，比循环更高效
-        let current_idx = self.focused_tags.trailing_zeros();
+        // 1. 获取当前活跃显示器
+        let out_id = match &self.focused_output {
+            Some(id) => id.clone(),
+            None => return,
+        };
 
-        // 2. 计算动态边界 (Dynamic Boundary)
-        let occupied = self.get_occupied_tags();
+        let current_tags = match self.outputs.get(&out_id) {
+            Some(d) => d.tags,
+            None => return,
+        };
 
-        // 找到最高位的 1 在哪里。如果没有窗口，max_occupied_idx 设为 0 (Tag 1)
-        // 32 - leading_zeros - 1 得到最高位的索引
+        let current_idx = current_tags.trailing_zeros();
+        let occupied = self.get_occupied_tags(); // 这个可以保持全局，或者按需优化
+
         let max_occupied_idx = if occupied == 0 {
             0
         } else {
             32 - occupied.leading_zeros() - 1
         };
-
-        // 边界 = 最大占用索引 + 1 (保留一个备用空位)
-        // 限制最大为 8 (即 Tag 9)，防止跑到 Tag 10+ 去
         let bound_idx = (max_occupied_idx + 1).min(8);
 
-        // 3. 计算目标索引
         let next_idx = if delta > 0 {
-            // --- 向右移动 ---
             if current_idx >= bound_idx {
-                // 如果当前已经在边界（或者意外超出了边界），回到 Tag 1
                 0
             } else {
-                // 否则正常向右
                 current_idx + 1
             }
         } else {
-            // --- 向左移动 ---
             if current_idx == 0 {
-                // 如果在 Tag 1，跳到边界 (最右有窗口Tag + 1)
                 bound_idx
             } else {
-                // 否则正常向左
                 current_idx - 1
             }
         };
 
         let next_mask = 1 << next_idx;
 
-        // 仅当 Tag 真正改变时才执行操作，避免日志刷屏
-        if next_mask != self.focused_tags {
+        if next_mask != current_tags {
             println!(
-                "-> 动态流转: Tag {} -> Tag {}",
+                "-> [流转] 显示器 {:?} : Tag {} -> {}",
+                out_id,
                 current_idx + 1,
                 next_idx + 1
             );
-            self.focused_tags = next_mask;
-            // River 会在下一帧自动感知 focused_tags 变化并发起 ManageStart
+
+            // 【关键修正】修改显示器自己的真值
+            if let Some(out_data) = self.outputs.get_mut(&out_id) {
+                out_data.tags = next_mask;
+                // 同步影子变量
+                self.focused_tags = next_mask;
+            }
         }
     }
 

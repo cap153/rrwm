@@ -65,6 +65,8 @@ fn main() {
         last_output_serial: 0,
         layout_roots: HashMap::new(),
         focused_output: None,
+        pending_pointer_warp: None,
+        output_id_to_name: HashMap::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

@@ -22,7 +22,6 @@ pub struct OutputConfig {
     pub scale: Option<String>,
     pub transform: Option<String>,
     pub position: Option<PositionConfig>,
-    pub mirror: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

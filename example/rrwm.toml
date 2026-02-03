@@ -69,18 +69,18 @@ F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
 [keybindings.none]
 F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
 
-# 多显示器之间切换焦点(待实现)
+# 多显示器之间切换焦点
 [keybindings.alt_ctrl]
 n = { action = "focus", args = ["left_output"] }
 i = { action = "focus", args = ["right_output"] }
 
-# 多显示器之间移动窗口(待实现)
+# 多显示器之间移动窗口
 [keybindings.alt_ctrl_shift]
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
 [output.HDMI-A-1]
-tag = "1"
+focus-at-startup = "true"
 mode = "3840x2160@60.000" # 格式为"<width>x<height>" 或者 "<width>x<height>@<refresh rate>"，如果省略了刷新率，默认选择最高的刷新率。
 scale = "2" # 允许使用整数或分数量表，例如，比例为150％或者1.25。
 transform = "normal" # 允许逆时针旋转显示，有效值为:normal, 90, 180, 270, flipped, flipped-90, flipped-180 and flipped-270.
@@ -88,7 +88,6 @@ position={ x="1080", y="0" } # 输出在所有显示器坐标空间中的位置�
 # 注意：这里的宽度必须是逻辑宽度（物理像素 / 缩放比例）。比如一个 4K 屏幕（3840 宽）如果设置了 2 倍缩放，它在排版空间里只占 1920 个单位。
 
 [output.DP-1]
-tag = "9"
 mode = "1920x1080@60.000"
 scale = "1"
 transform = "90"

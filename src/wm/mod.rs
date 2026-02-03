@@ -6,6 +6,7 @@ use self::layout::{calculate_layout, Geometry, LayoutNode, SplitType};
 use crate::protocol::river_input::river_input_device_v1::{
     Event as InputDeviceEvent, RiverInputDeviceV1,
 };
+
 use crate::protocol::river_input::river_input_manager_v1::RiverInputManagerV1;
 use crate::protocol::river_layer_shell::river_layer_shell_output_v1::{
     Event as LayerOutEvent, RiverLayerShellOutputV1,
@@ -14,6 +15,7 @@ use crate::protocol::river_layer_shell::river_layer_shell_seat_v1::{
     Event as LayerSeatEvent, RiverLayerShellSeatV1,
 };
 use crate::protocol::river_layer_shell::river_layer_shell_v1::RiverLayerShellV1;
+use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
 use crate::protocol::river_wm::{
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
@@ -62,7 +64,8 @@ pub struct OutputData {
     pub height: i32,
     pub usable_area: Geometry,
     pub ls_output: Option<RiverLayerShellOutputV1>,
-    // pub raw_output: RiverOutputV1,
+    pub tags: u32,
+    pub base_tag: u32,
 }
 
 #[derive(Clone)]
@@ -72,7 +75,7 @@ pub struct WindowData {
     pub node: Option<RiverNodeV1>,
     pub tags: u32,
     pub app_id: Option<String>,
-    pub output: Option<ObjectId>,
+    pub output: Option<String>,
 }
 
 pub struct ModeInfo {
@@ -94,11 +97,11 @@ pub struct AppState {
     pub needs_reload: bool,
     pub river_wm: Option<RiverWindowManagerV1>,
     pub windows: Vec<WindowData>,
-    pub outputs: HashMap<ObjectId, OutputData>,
+    pub outputs: HashMap<String, OutputData>,
     pub main_seat: Option<RiverSeatV1>,
     pub current_width: i32,
     pub current_height: i32,
-    pub tag_focus_history: HashMap<(ObjectId, u32), ObjectId>,
+    pub tag_focus_history: HashMap<(String, u32), ObjectId>,
     pub last_geometry: HashMap<ObjectId, Geometry>,
     pub focused_window: Option<ObjectId>,
     pub focused_tags: u32,
@@ -115,8 +118,10 @@ pub struct AppState {
     pub output_manager: Option<ZwlrOutputManagerV1>,
     pub heads: Vec<HeadInfo>,
     pub last_output_serial: u32,
-    pub layout_roots: HashMap<(ObjectId, u32), LayoutNode>,
-    pub focused_output: Option<ObjectId>,
+    pub layout_roots: HashMap<(String, u32), LayoutNode>,
+    pub focused_output: Option<String>,
+    pub output_id_to_name: HashMap<ObjectId, String>,
+    pub pending_pointer_warp: Option<(i32, i32)>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -204,6 +209,26 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 state.handle_ipc_connections();
                 state.broadcast_status();
 
+                // --- 新增：物理焦点生效逻辑 ---
+                if let Some((x, y)) = state.pending_pointer_warp.take() {
+                    if let Some(seat) = &state.main_seat {
+                        println!("-> [物理焦点] 正在管理序列内执行鼠标瞬移: {},{}", x, y);
+                        seat.pointer_warp(x, y);
+                    }
+                }
+
+                // 同步当前活跃显示器的标签给全局（供状态栏/逻辑判定参考）
+                if let Some(out_id) = &state.focused_output {
+                    if let Some(out_data) = state.outputs.get(out_id) {
+                        // 打印日志，看看当前活跃屏幕是谁，它认为自己在看哪个 Tag
+                        println!(
+                            "-> [渲染检查] 活跃屏幕: {:?}, 标签掩码: {:b}",
+                            out_id, out_data.tags
+                        );
+                        state.focused_tags = out_data.tags;
+                    }
+                }
+
                 // 2. 智能焦点恢复
                 // 逻辑：如果当前没有焦点窗口，或者焦点窗口由于所在 Tag 被隐藏，则尝试恢复
                 let needs_restore = match &state.focused_window {
@@ -244,8 +269,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             continue;
                         }
 
-                        // 只要窗口的标签属于当前正在查看的标签，就显示
-                        if (w_data.tags & state.focused_tags) != 0 {
+                        let is_visible = if let Some(win_out_id) = &w_data.output {
+                            if let Some(out_data) = state.outputs.get(win_out_id) {
+                                // 窗口所属显示器正在看这个窗口的标签
+                                (w_data.tags & out_data.tags) != 0
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if is_visible {
                             w_data.window.show();
                         } else {
                             w_data.window.hide();
@@ -269,25 +304,21 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                 // 重点：这里不再用 .next()，而是迭代所有的 outputs
                 for (out_id, out_data) in &state.outputs {
-                    // 获取这个显示器在当前活跃 Tag 下的布局根节点
-                    // 注意：键已经变成了 (ObjectId, u32)
-                    let tree_key = (out_id.clone(), state.focused_tags);
+                    // 使用 out_data.tags 而不是全局的 state.focused_tags
+                    let tree_key = (out_id.clone(), out_data.tags);
 
                     if let Some(root) = state.layout_roots.get(&tree_key) {
                         let mut results = Vec::new();
-
-                        // 使用当前显示器真实的可用区域 (包含正确的 x, y 偏移)
+                        // 这里传入的 usable_area 已经是 actions.rs 算好的包含偏移的矩形
                         calculate_layout(root, out_data.usable_area, &mut results);
 
                         for (window, geom) in results {
-                            // 校验该窗口是否依然存在
-                            if let Some(w_info) = state.windows.iter().find(|w| w.id == window.id())
+                            if let Some(_w_info) =
+                                state.windows.iter().find(|w| w.id == window.id())
                             {
-                                if w_info.app_id.is_some() {
-                                    state.last_geometry.insert(window.id(), geom);
-                                    window.propose_dimensions(geom.w, geom.h);
-                                    window.set_tiled(Edges::all());
-                                }
+                                state.last_geometry.insert(window.id(), geom);
+                                window.propose_dimensions(geom.w, geom.h);
+                                window.set_tiled(Edges::all());
                             }
                         }
                     }
@@ -305,28 +336,19 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
-                // 1. 核心逻辑：遍历每一个显示器
-                for (out_id, out_data) in &state.outputs {
-                    // 2. 获取该显示器在当前标签页下的布局树
-                    let tree_key = (out_id.clone(), state.focused_tags);
-
+                for (out_name, out_data) in &state.outputs {
+                    let tree_key = (out_name.clone(), out_data.tags);
                     if let Some(root) = state.layout_roots.get(&tree_key) {
                         let mut results = Vec::new();
-
-                        // 3. 计算布局：此时 screen 的 x 坐标如果是副屏，会是 1920 之类的偏移值
                         calculate_layout(root, out_data.usable_area, &mut results);
 
-                        // 4. 应用坐标到每个窗口的 Render Node
                         for (window, geom) in results {
                             if let Some(w_data) =
                                 state.windows.iter_mut().find(|w| w.id == window.id())
                             {
-                                // 如果窗口还没有渲染节点（Render Node），创建一个
                                 if w_data.node.is_none() {
                                     w_data.node = Some(window.get_node(qh, ()));
                                 }
-
-                                // 设置绝对坐标并置顶
                                 if let Some(node) = &w_data.node {
                                     node.set_position(geom.x, geom.y);
                                     node.place_top();
@@ -335,35 +357,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                     }
                 }
-
-                // 5. 告诉 River 这一帧渲染指令发送完毕
                 proxy.render_finish();
             }
 
             WmEvent::Output { id } => {
-                println!("-> 发现新显示器，正在准备层级管理...");
-
-                let mut ls_out = None;
-                if let Some(ls_mgr) = &state.layer_shell_manager {
-                    // 只调用一次！并保存这个对象
-                    ls_out = Some(ls_mgr.get_output(&id, qh, ()));
-                }
-
-                state.outputs.insert(
-                    id.id(),
-                    OutputData {
-                        width: 0, // 等待 Dimensions 事件填充
-                        height: 0,
-                        usable_area: Geometry {
-                            x: 0,
-                            y: 0,
-                            w: 0,
-                            h: 0,
-                        },
-                        ls_output: ls_out,
-                        // raw_output: id.clone(), // 存下这个“人”，以后补证用
-                    },
-                );
+                println!("-> 发现新物理输出接口: {:?}", id.id());
             }
             _ => {}
         }
@@ -378,27 +376,34 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
         proxy: &RiverOutputV1,
-        event: crate::protocol::river_wm::river_output_v1::Event,
+        event: OutEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
         if let OutEvent::Dimensions { width, height } = event {
-            println!("-> 分辨率更新: {}x{}", width, height);
-            state.current_width = width;
-            state.current_height = height;
+            // 1. 通过 ID 找到显示器名字
+            if let Some(name) = state.output_id_to_name.get(&proxy.id()).cloned() {
+                if let Some(data) = state.outputs.get_mut(&name) {
+                    println!(
+                        "-> [硬件] 显示器 {} 报告逻辑分辨率: {}x{}",
+                        name, width, height
+                    );
+                    data.width = width;
+                    data.height = height;
 
-            // 找到现有的 OutputData 并更新它
-            if let Some(data) = state.outputs.get_mut(&proxy.id()) {
-                data.width = width;
-                data.height = height;
-                data.usable_area = Geometry {
-                    x: 0,
-                    y: 0,
-                    w: width,
-                    h: height,
-                };
+                    if data.usable_area.w == 0 {
+                        data.usable_area = Geometry {
+                            x: 0,
+                            y: 0,
+                            w: width,
+                            h: height,
+                        };
+                    } else {
+                        data.usable_area.w = width;
+                        data.usable_area.h = height;
+                    }
+                }
             }
             if let Some(wm) = &state.river_wm {
                 wm.manage_dirty();
@@ -480,10 +485,8 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                     && (w.tags & win_tag) != 0
                                     && w.output.as_ref() == Some(out_id)
                             }) {
-                                // 使用 Key 2 插入
-                                state
-                                    .tag_focus_history
-                                    .insert(history_key, other.id.clone());
+                                // 使用元组键 tree_key
+                                state.tag_focus_history.insert(tree_key, other.id.clone());
                             }
                         }
                     }
@@ -810,7 +813,26 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for AppState {
     ) {
         if let Some(head) = state.heads.iter_mut().find(|h| h.obj.id() == proxy.id()) {
             match event {
-                HeadEvent::Name { name } => head.name = name,
+                HeadEvent::Name { name } => {
+                    head.name = name.clone();
+                    // 【核心修正】在这里初始化真正的 Output 记录，以名字为键
+                    state.outputs.entry(name.clone()).or_insert(OutputData {
+                        width: 0,
+                        height: 0,
+                        usable_area: Geometry {
+                            x: 0,
+                            y: 0,
+                            w: 0,
+                            h: 0,
+                        },
+                        ls_output: None,
+                        tags: 1,
+                        base_tag: 1,
+                    });
+                    if state.focused_output.is_none() {
+                        state.focused_output = Some(name);
+                    }
+                }
                 HeadEvent::CurrentMode { mode } => head.current_mode = Some(mode.id()),
                 HeadEvent::Mode { mode } => {
                     head.modes.push(ModeInfo {
