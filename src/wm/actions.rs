@@ -61,6 +61,8 @@ impl Action {
                 match arg {
                     "left_output" => Action::FocusOutput(Direction::Left),
                     "right_output" => Action::FocusOutput(Direction::Right),
+                    "up_output" => Action::FocusOutput(Direction::Up),
+                    "down_output" => Action::FocusOutput(Direction::Down),
                     "left" => Action::Focus(Direction::Left),
                     "right" => Action::Focus(Direction::Right),
                     "up" => Action::Focus(Direction::Up),
@@ -116,47 +118,48 @@ impl AppState {
             None => return,
         };
 
-        // 1. 将所有显示器按 X 坐标排序，确定物理上的左右顺序
+        // 1. 将所有显示器放入列表
         let mut sorted: Vec<_> = self.outputs.iter().collect();
-        sorted.sort_by_key(|(_, data)| data.usable_area.x);
 
+        // 2. 根据方向动态选择排序轴
+        sorted.sort_by_key(|(_, data)| match dir {
+            Direction::Left | Direction::Right => data.usable_area.x,
+            Direction::Up | Direction::Down => data.usable_area.y,
+        });
+
+        // 3. 寻找当前索引并计算下一个索引
         if let Some(pos) = sorted.iter().position(|(id, _)| **id == current_out) {
             let next_idx = match dir {
-                Direction::Right => (pos + 1) % sorted.len(),
-                Direction::Left => (pos + sorted.len() - 1) % sorted.len(),
-                _ => pos,
+                // 向右或向下移动，取下一个索引
+                Direction::Right | Direction::Down => (pos + 1) % sorted.len(),
+                // 向左或向上移动，取上一个索引
+                Direction::Left | Direction::Up => (pos + sorted.len() - 1) % sorted.len(),
             };
 
             if next_idx == pos {
                 return;
-            } // 如果只有一个显示器，就不动
+            }
 
             let (next_id, next_data) = sorted[next_idx];
             let next_id = next_id.clone();
 
             println!(
-                "-> [显示器焦点] 切换至 {:?} (坐标: {},{})",
-                next_id, next_data.usable_area.x, next_data.usable_area.y
+                "-> [显示器焦点] {} 切换至 {} (方向: {:?})",
+                current_out, next_id, dir
             );
 
-            // 2. 更新内存里的活跃显示器 ID
+            // 4. 更新内存并排队执行鼠标瞬移
             self.focused_output = Some(next_id.clone());
-
-            // 3. 【核心修改】计算目标显示器的中心点，并加入瞬移排队
-            // 使用 next_data.usable_area，这已经是考虑了旋转和缩放后的逻辑坐标
             let cx = next_data.usable_area.x + (next_data.usable_area.w / 2);
             let cy = next_data.usable_area.y + (next_data.usable_area.h / 2);
-
-            println!("-> [排队] 准备将鼠标瞬移至新显示器中心: {},{}", cx, cy);
             self.pending_pointer_warp = Some((cx, cy));
 
-            // 4. 恢复该显示器在当前 Tag 下的历史焦点窗口
+            // 5. 恢复该屏幕在该标签下的焦点窗口
             self.focused_window = self
                 .tag_focus_history
                 .get(&(next_id, self.focused_tags))
                 .cloned();
 
-            // 5. 触发 River 的管理序列，让 mod.rs 有机会执行瞬移
             if let Some(wm) = &self.river_wm {
                 wm.manage_dirty();
             }
