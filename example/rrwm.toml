@@ -44,7 +44,12 @@ Return = { action = "spawn", args = ["ghostty"] }
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
 # 重载配置
-c = { action = "reload_configuration" }
+c = [
+    { action = "reload_configuration" },
+    { action = "shell", cmd = "pkill waybar; sleep 0.1; WAYLAND_DISPLAY=wayland-2 waybar &" },
+    { action = "shell", cmd = "swww img ~/github/pic/wallhaven-yqqyjx.jpg -o HDMI-A-1" },
+    { action = "shell", cmd = "swww img ~/github/pic/鸣潮/wallhaven-po83gp.jpg -o DP-1" }
+]
 # 跨标签移动窗口
 1 = { action = "move", args = ["1"] }
 2 = { action = "move", args = ["2"] }
@@ -87,12 +92,12 @@ n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
 [output.HDMI-A-1]
-focus-at-startup = "true"
+focus-at-startup = "true" # 默认聚焦在这个显示器，确保只有一个显示器配置了这个选项，否则启动时的焦点可能是随机的
 mode = "3840x2160@60.000" # 格式为"<width>x<height>" 或者 "<width>x<height>@<refresh rate>"，如果省略了刷新率，默认选择最高的刷新率。
-scale = "2" # 允许使用整数或分数量表，例如，比例为150％或者1.25。
-transform = "normal" # 允许逆时针旋转显示，有效值为:normal, 90, 180, 270, flipped, flipped-90, flipped-180 and flipped-270.
-position={ x="1080", y="0" } # 输出在所有显示器坐标空间中的位置。未明确配置位置的显示器将放置在所有已放置的显示器右侧。
-# 注意：这里的宽度必须是逻辑宽度（物理像素 / 缩放比例）。比如一个 4K 屏幕（3840 宽）如果设置了 2 倍缩放，它在排版空间里只占 1920 个单位。
+scale = "2" # 整数或分数调整缩放，例如"1.25"。
+transform = "normal" # 旋转显示，有效值为:normal, 90, 180, 270, flipped, flipped-90, flipped-180 and flipped-270.
+position={ x="1080", y="0" } # 输出在所有显示器坐标空间中的位置。未明确配置位置的显示器将默认position={ x="0", y="0" }实现镜像效果
+# 注意：这里的宽度(或高度)必须是逻辑宽度（物理像素 / 缩放比例）。比如一个 4K 屏幕（3840 宽）如果设置了 2 倍缩放，它在排版空间里只占 1920 个单位。
 
 [output.DP-1]
 mode = "1920x1080@60.000"

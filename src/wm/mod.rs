@@ -55,7 +55,7 @@ use xkbcommon::xkb;
 /// 快捷键状态结构：将 River 绑定对象与本地 Action 关联
 pub struct KeyBinding {
     pub obj: RiverXkbBindingV1,
-    pub action: Action,
+    pub actions: Vec<Action>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,15 +671,22 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
         qh: &QueueHandle<Self>,
     ) {
         if let BindingEvent::Pressed = event {
-            if let Some(kb) = state.key_bindings.iter().find(|b| b.obj.id() == proxy.id()) {
-                // 先把动作拿出来存进变量
-                let action = kb.action.clone();
-                // 执行动作
-                state.perform_action(action.clone());
-                // 如果是重载动作，在这里补一发显示器申请
-                if let Action::ReloadConfiguration = action {
-                    let serial = state.last_output_serial;
-                    state.apply_output_configs(qh, serial);
+            // 先查找并克隆动作列表，立即结束对 state 的不可变借用
+            let actions_to_run = state
+                .key_bindings
+                .iter()
+                .find(|b| b.obj.id() == proxy.id())
+                .map(|b| b.actions.clone());
+
+            // 现在 state 已经“自由”了，我们可以安全地调用 perform_action(&mut self)
+            if let Some(actions) = actions_to_run {
+                for action in actions {
+                    state.perform_action(action.clone());
+
+                    if let Action::ReloadConfiguration = action {
+                        let serial = state.last_output_serial;
+                        state.apply_output_configs(qh, serial);
+                    }
                 }
             }
 

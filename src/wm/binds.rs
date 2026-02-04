@@ -11,7 +11,6 @@ fn parse_mod_group(group: &str) -> Modifiers {
     if group.to_lowercase() == "none" {
         return Modifiers::empty();
     }
-
     let parts: Vec<&str> = group.split(|c| c == '_' || c == '+' || c == '-').collect();
     let mut mask = Modifiers::empty();
     for p in parts {
@@ -26,25 +25,61 @@ fn parse_mod_group(group: &str) -> Modifiers {
     mask
 }
 
-/// 辅助函数：注册单个绑定
-fn register_single_binding(
+/// 辅助函数：真正向 River 注册绑定并存入 state
+fn commit_binding(
     state: &mut AppState,
     mgr: &RiverXkbBindingsV1,
     seat: &RiverSeatV1,
     qh: &QueueHandle<AppState>,
     key_name: &str,
     mods: Modifiers,
-    cfg: &crate::config::ActionConfig,
+    actions: Vec<Action>,
 ) {
     let keysym = xkb::keysym_from_name(key_name, xkb::KEYSYM_NO_FLAGS).raw();
-    let action = Action::from_config(&cfg.action, &cfg.args, &cfg.cmd);
-
     let binding_obj = mgr.get_xkb_binding(seat, keysym, mods, qh, ());
 
     state.key_bindings.push(KeyBinding {
         obj: binding_obj,
-        action,
+        actions, // <--- 修正：存入 Vec<Action>
     });
+}
+
+/// 核心递归解析函数：把 TOML 的嵌套结构变成 Vec<Action> 并注册
+fn process_entry(
+    state: &mut AppState,
+    mgr: &RiverXkbBindingsV1,
+    seat: &RiverSeatV1,
+    qh: &QueueHandle<AppState>,
+    key_or_mod: &str,
+    current_mods: Modifiers,
+    entry: &crate::config::KeyBindingEntry,
+) {
+    match entry {
+        // 情况 1：单个动作
+        crate::config::KeyBindingEntry::Action(cfg) => {
+            let actions = vec![Action::from_config(&cfg.action, &cfg.args, &cfg.cmd)];
+            commit_binding(state, mgr, seat, qh, key_or_mod, current_mods, actions);
+        }
+        // 情况 2：动作列表 [ {action=...}, {action=...} ]
+        crate::config::KeyBindingEntry::List(cfgs) => {
+            let actions = cfgs
+                .iter()
+                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd))
+                .collect();
+            commit_binding(state, mgr, seat, qh, key_or_mod, current_mods, actions);
+        }
+        // 情况 3：修饰符分组 [keybindings.alt]
+        crate::config::KeyBindingEntry::Group(sub_map) => {
+            // 解析这一层增加的修饰符
+            let extra_mods = parse_mod_group(key_or_mod);
+            let combined_mods = current_mods | extra_mods;
+
+            // 递归处理子项
+            for (sub_key, sub_entry) in sub_map {
+                process_entry(state, mgr, seat, qh, sub_key, combined_mods, sub_entry);
+            }
+        }
+    }
 }
 
 pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
@@ -57,42 +92,24 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
         None => return,
     };
 
-    // 克隆一份配置，避免在修改 key_bindings 时产生借用冲突
     if let Some(entries) = state.config.keybindings.clone() {
         println!("-> 正在从配置文件注册快捷键...");
-        for (key_or_mod, entry) in entries {
-            match entry {
-                // 情况 1：直接定义的按键 (无修饰符)
-                crate::config::KeyBindingEntry::Action(cfg) => {
-                    register_single_binding(
-                        state,
-                        &xkb_mgr,
-                        &seat,
-                        qh,
-                        &key_or_mod,
-                        Modifiers::empty(),
-                        &cfg,
-                    );
-                }
-                // 情况 2：分组按键
-                crate::config::KeyBindingEntry::Group(keys) => {
-                    let mods = parse_mod_group(&key_or_mod);
-                    for (key_name, cfg) in keys {
-                        register_single_binding(state, &xkb_mgr, &seat, qh, &key_name, mods, &cfg);
-                    }
-                }
-            }
+        for (key_or_mod, entry) in &entries {
+            process_entry(
+                state,
+                &xkb_mgr,
+                &seat,
+                qh,
+                key_or_mod,
+                Modifiers::empty(),
+                entry,
+            );
         }
     } else {
         println!("-> 未发现快捷键配置，加载默认 Colemak 导航键位...");
         let defaults = crate::config::get_default_bindings();
         for b in defaults {
-            let keysym = xkb::keysym_from_name(b.key, xkb::KEYSYM_NO_FLAGS).raw();
-            let binding_obj = xkb_mgr.get_xkb_binding(&seat, keysym, b.mods, qh, ());
-            state.key_bindings.push(KeyBinding {
-                obj: binding_obj,
-                action: b.action,
-            });
+            commit_binding(state, &xkb_mgr, &seat, qh, b.key, b.mods, vec![b.action]);
         }
     }
 }

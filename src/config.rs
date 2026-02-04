@@ -59,10 +59,12 @@ pub struct ActionConfig {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum KeyBindingEntry {
-    /// 对应直接定义的按键，如 F1 = { action = "..." }
+    /// 对应直接定义的单个按键，如 q = { action = "..." }
     Action(ActionConfig),
-    /// 对应修饰符分组，如 [keybindings.super]
-    Group(HashMap<String, ActionConfig>),
+    /// 对应动作列表，如 c = [ { action = "..." }, { action = "..." } ]
+    List(Vec<ActionConfig>),
+    /// Box<KeyBindingEntry> 以支持递归，既可以写单个动作，也可以写动作列表
+    Group(HashMap<String, Box<KeyBindingEntry>>),
 }
 
 // 5. 根配置结构体
