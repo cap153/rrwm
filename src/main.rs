@@ -66,10 +66,8 @@ fn main() {
         layout_roots: HashMap::new(),
         focused_output: None,
         pending_pointer_warp: None,
-        output_id_to_name: HashMap::new(),
         last_sent_json: String::new(),
         anonymous_ls_outputs: Vec::new(),
-        river_id_to_name: HashMap::new(),
         wl_name_to_monitor_name: HashMap::new(),
     };
 

@@ -63,6 +63,7 @@ pub struct OutputData {
     pub width: i32,
     pub height: i32,
     pub usable_area: Geometry,
+    pub full_area: Geometry,
     pub ls_output: Option<RiverLayerShellOutputV1>,
     pub tags: u32,
     pub base_tag: u32,
@@ -120,11 +121,9 @@ pub struct AppState {
     pub last_output_serial: u32,
     pub layout_roots: HashMap<(String, u32), LayoutNode>,
     pub focused_output: Option<String>,
-    pub output_id_to_name: HashMap<ObjectId, String>,
     pub pending_pointer_warp: Option<(i32, i32)>,
     pub last_sent_json: String,
     pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
-    pub river_id_to_name: HashMap<ObjectId, String>,
     pub wl_name_to_monitor_name: HashMap<u32, String>,
 }
 
@@ -388,46 +387,15 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
-        proxy: &RiverOutputV1,
+        _proxy: &RiverOutputV1,
         event: OutEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         match event {
-            // River 告诉我们，这个 Output 对应哪个全局编号
-            OutEvent::WlOutput { name } => {
-                if let Some(mon_name) = state.wl_name_to_monitor_name.get(&name).cloned() {
-                    println!(
-                        "-> [关联] RiverOutput {:?} 成功认领显示器: {}",
-                        proxy.id(),
-                        mon_name
-                    );
-                    state.river_id_to_name.insert(proxy.id(), mon_name);
-                }
-            }
-
             OutEvent::Dimensions { width, height } => {
-                // 使用 river_id_to_name 来查表
-                if let Some(mon_name) = state.river_id_to_name.get(&proxy.id()).cloned() {
-                    if let Some(out_data) = state.outputs.get_mut(&mon_name) {
-                        out_data.width = width;
-                        out_data.height = height;
-
-                        // 保护 usable_area：如果是重载，我们保留 actions.rs 算好的 x/y
-                        if out_data.usable_area.w == 0 {
-                            out_data.usable_area = Geometry {
-                                x: 0,
-                                y: 0,
-                                w: width,
-                                h: height,
-                            };
-                        } else {
-                            out_data.usable_area.w = width;
-                            out_data.usable_area.h = height;
-                        }
-                    }
-                }
+                println!("-> [硬件层] 收到物理分辨率信号: {}x{}", width, height);
                 if let Some(wm) = &state.river_wm {
                     wm.manage_dirty();
                 }
@@ -804,22 +772,26 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
         _: &QueueHandle<Self>,
     ) {
         match event {
+            // src/wm/mod.rs -> LayerOutEvent
             LayerOutEvent::NonExclusiveArea {
                 x,
                 y,
                 width,
                 height,
             } => {
-                // 【核心逻辑】坐标匹配：看看这个预留区域落在了哪个显示器的领地里
-                let mut matched_name = None;
+                // 计算该 Bar 的中心点坐标
+                let bar_cx = x + (width / 2);
+                let bar_cy = y + (height / 2);
 
+                let mut matched_name = None;
                 for (name, out_data) in &state.outputs {
-                    // 只要这个预留区域的起始点 (x, y) 落在显示器的物理边界内，就是它了！
-                    // 这里的 10 是为了容错处理
-                    if x >= out_data.usable_area.x - 10
-                        && x < out_data.usable_area.x + 1920
-                        && y >= out_data.usable_area.y - 10
-                        && y < out_data.usable_area.y + 1920
+                    let g = out_data.full_area;
+                    // 严格的中心点包含判定，不再需要 +/- 10 容错
+                    if g.w > 0
+                        && bar_cx >= g.x
+                        && bar_cx < g.x + g.w
+                        && bar_cy >= g.y
+                        && bar_cy < g.y + g.h
                     {
                         matched_name = Some(name.clone());
                         break;
@@ -832,23 +804,22 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
                             "-> [Bar占位] 显示器 {} 预留空间: {}x{} @ {},{}",
                             name, width, height, x, y
                         );
-
-                        // 更新可用区域：这会让窗口避开 Waybar
                         out_data.usable_area = Geometry {
                             x,
                             y,
                             w: width,
                             h: height,
                         };
-
-                        // 关联对象：把这个 ls_output 存进对应的 OutputData 里（供 ManageStart set_default 用）
                         out_data.ls_output = Some(proxy.clone());
-
-                        // 强行刷新布局
                         if let Some(wm) = &state.river_wm {
                             wm.manage_dirty();
                         }
                     }
+                } else {
+                    println!(
+                        "-> [Bar] 收到预留请求 {}x{} @ {},{} 但未匹配到显示器 (可能尚未配置)",
+                        width, height, x, y
+                    );
                 }
             }
         }
@@ -912,6 +883,12 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for AppState {
                             w: 0,
                             h: 0,
                         },
+                        full_area: Geometry {
+                            x: 0,
+                            y: 0,
+                            w: 0,
+                            h: 0,
+                        }, // 初始化
                         ls_output: None,
                         tags: 1,
                         base_tag: 1,

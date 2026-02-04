@@ -33,7 +33,7 @@ u = { action = "focus", args = ["up"] }
 e = { action = "focus", args = ["down"] }
 # 启动软件
 Return = { action = "spawn", args = ["kitty"] }
-x = { action="spawn", args=["chromium", "--proxy-server=http://127.0.0.1:7897", "https://aistudio.google.com"] }
+x = { action="spawn", args=["zen"] }
 j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | /usr/bin/satty --filename -' }
 a = { action="spawn", args=["/usr/bin/fuzzel", "toggle"] }
 
@@ -45,10 +45,9 @@ Return = { action = "spawn", args = ["ghostty"] }
 [keybindings.alt_shift]
 # 重载配置
 c = [
-    { action = "reload_configuration" },
-    { action = "shell", cmd = "pkill waybar; sleep 0.1; WAYLAND_DISPLAY=wayland-2 waybar &" },
-    { action = "shell", cmd = "swww img ~/github/pic/wallhaven-yqqyjx.jpg -o HDMI-A-1" },
-    { action = "shell", cmd = "swww img ~/github/pic/鸣潮/wallhaven-po83gp.jpg -o DP-1" }
+	{ action = "reload_configuration" },
+	{ action = "spawn", args = ["pkill", "waybar"] },
+	{ action = "shell", cmd = "sleep 0.1;waybar &" },
 ]
 # 跨标签移动窗口
 1 = { action = "move", args = ["1"] }

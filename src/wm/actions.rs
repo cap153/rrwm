@@ -339,19 +339,12 @@ impl AppState {
 
         println!("-> 正在计算多显示器独立排布 (基于名称索引)...");
 
-        // 每次配置前清空 ID 映射，因为 apply 之后旧 ID 会失效
-        self.output_id_to_name.clear();
-
+        // --- 第一轮：计算几何数据与名字映射 ---
         for head in &self.heads {
             let name = head.name.clone();
             let cfg = self.config.output.as_ref().and_then(|m| m.get(&name));
 
-            // 建立 Wlr ID 到名字的映射
-            self.output_id_to_name.insert(head.obj.id(), name.clone());
-
-            // --- 【关键修正】重载保护逻辑 ---
-            // 只有当这个显示器是第一次见到时，才进行初始化
-            // 这保证了重载配置时，你正在看的 Tag 不会被重置回 1
+            // 【修改 1】初始化 OutputData 时补全 full_area 字段
             self.outputs.entry(name.clone()).or_insert_with(|| {
                 println!("   [初始化] 发现全新显示器记录: {}", name);
                 OutputData {
@@ -363,13 +356,18 @@ impl AppState {
                         w: 0,
                         h: 0,
                     },
+                    full_area: Geometry {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    }, // <--- 新增初始化
                     ls_output: None,
-                    tags: 1, // 新显示器默认看 Tag 1
+                    tags: 1,
                     base_tag: 1,
                 }
             });
 
-            // 处理启动焦点配置
             if let Some(c) = cfg {
                 if c.focus_at_startup.as_deref() == Some("true") {
                     if !startup_focus_found {
@@ -379,7 +377,6 @@ impl AppState {
                 }
             }
 
-            // 计算几何
             let scale = cfg
                 .and_then(|c| c.scale.as_ref())
                 .and_then(|s| s.parse::<f64>().ok())
@@ -438,18 +435,25 @@ impl AppState {
                 }
 
                 if let Some(out_data) = self.outputs.get_mut(&res.name) {
-                    // 更新尺寸和位置，但不改动 tags
-                    out_data.usable_area = Geometry {
+                    // 【修改 2】同时更新 usable_area 和 full_area
+                    // 这里的坐标 (res.x, res.y) 是最准确的“房产证”坐标
+                    let geometry = Geometry {
                         x: res.x,
                         y: res.y,
                         w: res.w,
                         h: res.h,
                     };
+                    out_data.usable_area = geometry;
+                    out_data.full_area = geometry; // <--- 关键：固化全屏物理坐标
                 }
             }
         }
 
         config_obj.apply();
+
+        if let Some(wm) = &self.river_wm {
+            wm.manage_dirty();
+        }
 
         // --- 第三轮：鼠标瞬移排队 ---
         let final_target_name =
