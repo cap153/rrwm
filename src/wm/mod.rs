@@ -329,9 +329,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
 
                 // 6. 后续清理：Waybar 激活与快捷键使能
-                for out_data in state.outputs.values() {
-                    if let Some(ls_out) = &out_data.ls_output {
-                        ls_out.set_default();
+                if let Some(focused_name) = &state.focused_output {
+                    if let Some(out_data) = state.outputs.get(focused_name) {
+                        if let Some(ls_out) = &out_data.ls_output {
+                            // 告诉 River：接下来任何没指定位置的层级窗口（如 fuzzel），请放到这个屏幕
+                            ls_out.set_default();
+                        }
                     }
                 }
                 for kb in &state.key_bindings {
