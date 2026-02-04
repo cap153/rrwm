@@ -69,6 +69,8 @@ fn main() {
         output_id_to_name: HashMap::new(),
         last_sent_json: String::new(),
         anonymous_ls_outputs: Vec::new(),
+        river_id_to_name: HashMap::new(),
+        wl_name_to_monitor_name: HashMap::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

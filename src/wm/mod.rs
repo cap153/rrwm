@@ -124,6 +124,8 @@ pub struct AppState {
     pub pending_pointer_warp: Option<(i32, i32)>,
     pub last_sent_json: String,
     pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
+    pub river_id_to_name: HashMap<ObjectId, String>,
+    pub wl_name_to_monitor_name: HashMap<u32, String>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -380,8 +382,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 }
 
 // --- 3. 监听 RiverOutputV1 (分辨率) ---
-// src/wm/mod.rs
-
 impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -391,32 +391,45 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
-        if let OutEvent::Dimensions { width, height } = event {
-            // 通过 ID 反查名字
-            if let Some(name) = state.output_id_to_name.get(&proxy.id()).cloned() {
-                if let Some(data) = state.outputs.get_mut(&name) {
-                    // println!("-> [硬件] {} 报告分辨率: {}x{}", name, width, height);
-                    data.width = width;
-                    data.height = height;
-
-                    // 保护逻辑：只更新宽高，绝对不重置 actions.rs 算好的 x 和 y
-                    if data.usable_area.w == 0 && data.usable_area.h == 0 {
-                        data.usable_area = Geometry {
-                            x: 0,
-                            y: 0,
-                            w: width,
-                            h: height,
-                        };
-                    } else {
-                        data.usable_area.w = width;
-                        data.usable_area.h = height;
-                    }
+        match event {
+            // River 告诉我们，这个 Output 对应哪个全局编号
+            OutEvent::WlOutput { name } => {
+                if let Some(mon_name) = state.wl_name_to_monitor_name.get(&name).cloned() {
+                    println!(
+                        "-> [关联] RiverOutput {:?} 成功认领显示器: {}",
+                        proxy.id(),
+                        mon_name
+                    );
+                    state.river_id_to_name.insert(proxy.id(), mon_name);
                 }
             }
-            if let Some(wm) = &state.river_wm {
-                wm.manage_dirty();
+
+            OutEvent::Dimensions { width, height } => {
+                // 使用 river_id_to_name 来查表
+                if let Some(mon_name) = state.river_id_to_name.get(&proxy.id()).cloned() {
+                    if let Some(out_data) = state.outputs.get_mut(&mon_name) {
+                        out_data.width = width;
+                        out_data.height = height;
+
+                        // 保护 usable_area：如果是重载，我们保留 actions.rs 算好的 x/y
+                        if out_data.usable_area.w == 0 {
+                            out_data.usable_area = Geometry {
+                                x: 0,
+                                y: 0,
+                                w: width,
+                                h: height,
+                            };
+                        } else {
+                            out_data.usable_area.w = width;
+                            out_data.usable_area.h = height;
+                        }
+                    }
+                }
+                if let Some(wm) = &state.river_wm {
+                    wm.manage_dirty();
+                }
             }
+            _ => {}
         }
     }
 }
@@ -879,7 +892,7 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for AppState {
             match event {
                 HeadEvent::Name { name } => {
                     head.name = name.clone();
-                    // 【核心修正】在这里初始化真正的 Output 记录，以名字为键
+                    // 这里原本的 entry().or_insert() 逻辑保持不变
                     state.outputs.entry(name.clone()).or_insert(OutputData {
                         width: 0,
                         height: 0,

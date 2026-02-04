@@ -2,6 +2,7 @@
 use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
 use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
+use crate::wm::OutputData;
 use serde::Serialize;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
@@ -319,7 +320,6 @@ impl AppState {
 
         let config_obj = mgr.create_configuration(serial, qh, ());
 
-        // 存储最终计算结果的临时结构
         struct FinalConfig {
             name: String,
             id: ObjectId,
@@ -339,39 +339,47 @@ impl AppState {
 
         println!("-> 正在计算多显示器独立排布 (基于名称索引)...");
 
-        // 【关键】每一轮配置开始前，清空旧的 ID 映射，因为 apply 后 ID 会变
+        // 每次配置前清空 ID 映射，因为 apply 之后旧 ID 会失效
         self.output_id_to_name.clear();
 
-        // --- 第一轮：计算几何数据与名字映射 ---
         for head in &self.heads {
             let name = head.name.clone();
             let cfg = self.config.output.as_ref().and_then(|m| m.get(&name));
 
-            // 建立桥梁：让 mod.rs 能通过 ID 找到这个名字
+            // 建立 Wlr ID 到名字的映射
             self.output_id_to_name.insert(head.obj.id(), name.clone());
 
-            // 1. 处理启动焦点配置
+            // --- 【关键修正】重载保护逻辑 ---
+            // 只有当这个显示器是第一次见到时，才进行初始化
+            // 这保证了重载配置时，你正在看的 Tag 不会被重置回 1
+            self.outputs.entry(name.clone()).or_insert_with(|| {
+                println!("   [初始化] 发现全新显示器记录: {}", name);
+                OutputData {
+                    width: 0,
+                    height: 0,
+                    usable_area: Geometry {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    },
+                    ls_output: None,
+                    tags: 1, // 新显示器默认看 Tag 1
+                    base_tag: 1,
+                }
+            });
+
+            // 处理启动焦点配置
             if let Some(c) = cfg {
                 if c.focus_at_startup.as_deref() == Some("true") {
                     if !startup_focus_found {
                         target_output_name = Some(name.clone());
                         startup_focus_found = true;
-                        println!("   [配置] 发现启动焦点显示器: {}", name);
-                    } else {
-                        println!(
-                            "   警告: 多个显示器配置了 focus-at-startup，将出现焦点随机事件！"
-                        );
                     }
                 }
             }
 
-            // 2. 初始化显示器的标签 (使用名字查找，解决 E0277)
-            if let Some(out_data) = self.outputs.get_mut(&name) {
-                out_data.tags = 1;
-                out_data.base_tag = 1;
-            }
-
-            // 3. 计算几何
+            // 计算几何
             let scale = cfg
                 .and_then(|c| c.scale.as_ref())
                 .and_then(|s| s.parse::<f64>().ok())
@@ -379,8 +387,6 @@ impl AppState {
             let (log_w, target_mode) = self.get_output_geometry(head, cfg, scale);
             let transform = Self::parse_transform(cfg);
 
-            // 4. 计算逻辑高度 (用于后续计算鼠标中心点)
-            // 我们需要拿到物理宽高再除以缩放
             let (phys_w, phys_h) = if let Some(m) = &target_mode {
                 head.modes
                     .iter()
@@ -398,7 +404,6 @@ impl AppState {
                 _ => (phys_h as f64 / scale).ceil() as i32,
             };
 
-            // 5. 确定坐标
             let (x, y) = if let Some(pos) = cfg.and_then(|c| c.position.as_ref()) {
                 (pos.x.parse().unwrap_or(0), pos.y.parse().unwrap_or(0))
             } else {
@@ -421,7 +426,7 @@ impl AppState {
             cursor_x = cursor_x.max(x + log_w);
         }
 
-        // --- 第二轮：向 River 提交物理配置并更新内存 ---
+        // --- 第二轮：提交物理配置并更新内存 ---
         for res in &calculated {
             if let Some(head_info) = self.heads.iter().find(|h| h.obj.id() == res.id) {
                 let head_config = config_obj.enable_head(&head_info.obj, qh, ());
@@ -432,8 +437,8 @@ impl AppState {
                     head_config.set_mode(m);
                 }
 
-                // 【修正】使用名字查找更新，确保 usable_area 固化了算好的坐标和对调后的宽高
                 if let Some(out_data) = self.outputs.get_mut(&res.name) {
+                    // 更新尺寸和位置，但不改动 tags
                     out_data.usable_area = Geometry {
                         x: res.x,
                         y: res.y,
@@ -446,19 +451,13 @@ impl AppState {
 
         config_obj.apply();
 
-        // --- 第三轮：准备物理焦点生效 (Pointer Warp) ---
+        // --- 第三轮：鼠标瞬移排队 ---
         let final_target_name =
             target_output_name.or_else(|| calculated.first().map(|c| c.name.clone()));
-
         if let Some(t_name) = final_target_name {
             if let Some(target_res) = calculated.iter().find(|c| c.name == t_name) {
                 let center_x = target_res.x + (target_res.w / 2);
                 let center_y = target_res.y + (target_res.h / 2);
-
-                println!(
-                    "-> [排队] 准备在安全时刻瞬移鼠标至 {} 中心: {},{}",
-                    t_name, center_x, center_y
-                );
                 self.pending_pointer_warp = Some((center_x, center_y));
                 self.focused_output = Some(t_name);
             }
