@@ -663,14 +663,11 @@ impl AppState {
     /// 辅助：统一生成给 Waybar 的状态数据
     fn get_waybar_response_json(&self) -> String {
         let occupied = self.get_occupied_tags();
-        let user_icons = self
-            .config
-            .appearance
-            .as_ref()
-            .and_then(|a| a.tag_icons.as_ref());
+        let waybar_cfg = self.config.waybar.as_ref(); // 获取 [waybar] 配置
+
         let mut tag_strings = Vec::new();
 
-        // 计算显示范围
+        // 1. 计算显示范围
         let max_occupied_idx = if occupied == 0 {
             0
         } else {
@@ -683,23 +680,37 @@ impl AppState {
         };
         let visual_bound = (max_occupied_idx.max(focused_idx) + 1).min(31);
 
+        // 2. 循环生成每个标签的样式
         for i in 0..=visual_bound {
             let mask = 1 << i;
-            let icon = user_icons
+
+            // --- 获取图标 ---
+            let icon = waybar_cfg
+                .and_then(|c| c.tag_icons.as_ref())
                 .and_then(|icons| icons.get(i as usize))
                 .cloned()
                 .unwrap_or_else(|| (i + 1).to_string());
 
-            let styled_icon = if (self.focused_tags & mask) != 0 {
-                format!("<span color='#bd93f9'>{}</span>", icon)
+            // --- 确定当前状态对应的样式前缀 ---
+            // 逻辑：如果配置了样式字符串，就包裹它；如果没有，就返回 None
+            let style_prefix = if (self.focused_tags & mask) != 0 {
+                waybar_cfg.and_then(|c| c.focused_style.as_ref())
             } else if (occupied & mask) != 0 {
-                format!("<span color='#6C7086'>{}</span>", icon)
+                waybar_cfg.and_then(|c| c.occupied_style.as_ref())
             } else {
-                format!("<span color='#313244'>{}</span>", icon)
+                waybar_cfg.and_then(|c| c.empty_style.as_ref())
             };
+
+            // --- 应用样式 ---
+            let styled_icon = match style_prefix {
+                Some(prefix) => format!("{}{}</span>", prefix, icon),
+                None => icon,
+            };
+
             tag_strings.push(styled_icon);
         }
 
+        // 3. 构造最终的 Waybar 响应
         let response = WaybarResponse {
             text: tag_strings.join("  "),
             tooltip: format!("Focus: {}", self.get_active_window_title()),

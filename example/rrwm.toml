@@ -6,8 +6,11 @@ variant = "colemak"
 # options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
 model = "pc105" # 一般可选，默认 pc105
 
-[appearance]
-tag_icons = ["",  "", "", "", "",  ]
+[waybar]
+tag_icons = ["", "", "󰃽", "", "", "󰙯", "", "󰎄", "", "", "", "󰊴", "", "", "󰆍", "", "", "", "", "󰘦", "", "󰗨"]
+focused_style = "<span color='#bd93f9'>"
+occupied_style = "<span color='#6C7086'>"
+empty_style = "<span color='#313244'>"
 
 [keybindings.alt]
 # 关闭聚焦窗口
@@ -22,7 +25,7 @@ q = { action = "close_focused" }
 7 = { action = "focus", args = ["7"] }
 8 = { action = "focus", args = ["8"] }
 9 = { action = "focus", args = ["9"] }
-0 = { action = "focus", args = ["10"] }
+0 = { action = "focus", args = ["31"] }
 # 上下左右焦点切换，边界自动跨标签
 n = { action = "focus", args = ["left"] }
 i = { action = "focus", args = ["right"] }
