@@ -4,7 +4,7 @@
 	"custom/rrwm_tags": {
 			"format": "{}",
 			"return-type": "json",
-			"exec": "rrwm --status",
+			"exec": "rrwm --waybar",
 			"escape": false
 	},
 }

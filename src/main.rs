@@ -16,8 +16,8 @@ fn main() {
     // 获取命令行参数
     let args: Vec<String> = std::env::args().collect();
     // 判定是否进入“客户端状态模式”
-    if args.len() > 1 && args[1] == "--status" {
-        run_status_client();
+    if args.len() > 1 && args[1] == "--waybar" {
+        run_waybar_client();
         return; // 运行完客户端就退出，不启动 WM
     }
 
@@ -87,7 +87,7 @@ fn main() {
 }
 
 /// 客户端模式：连接 Socket 并把收到的东西直接打印出来
-fn run_status_client() {
+fn run_waybar_client() {
     let display_name = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
     let socket_path = format!("/tmp/rrwm-{}.sock", display_name);
 
