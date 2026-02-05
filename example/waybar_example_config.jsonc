@@ -1,3 +1,4 @@
+// ~/.config/waybar/config.jsonc
 {
 	"modules-left": ["custom/rrwm_tags"],
 	"custom/rrwm_tags": {

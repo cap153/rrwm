@@ -1,8 +1,8 @@
-// src/wm/actions.rs
 use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
 use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
 use crate::wm::OutputData;
+use log::{error, info, warn};
 use serde::Serialize;
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
@@ -109,7 +109,7 @@ impl Action {
             "shell" => Action::Shell(cmd.clone().unwrap_or_default()),
 
             _ => {
-                println!("警告：未知的动作名称 {}", name);
+                warn!("Warning: Unknown action name {}", name);
                 Action::Shell("true".to_string())
             }
         }
@@ -144,8 +144,8 @@ impl AppState {
             // 【核心修正】获取目标显示器当前正在查看的标签
             let next_monitor_tags = next_data.tags;
 
-            println!(
-                "-> [跨屏跳转] {} (Tag掩码:{:b}) -> {} (Tag掩码:{:b})",
+            info!(
+                "-> [Cross-screen jump] {} (Tag mask: {:b}) -> {} (Tag mask: {:b})",
                 current_out, self.focused_tags, next_id, next_monitor_tags
             );
 
@@ -168,7 +168,7 @@ impl AppState {
 
             // 3. 执行焦点和鼠标瞬移
             if let Some(win_id) = edge_win {
-                println!("-> [焦点] 锁定目标屏幕边缘窗口: {:?}", win_id);
+                info!("-> [Focus] Lock target screen edge window: {:?}", win_id);
                 self.focused_window = Some(win_id.clone());
                 self.tag_focus_history.insert(tree_key, win_id.clone());
 
@@ -238,8 +238,8 @@ impl AppState {
                 Direction::Up => MoveHint::Bottommost,
             };
 
-            println!(
-                "-> [跨屏搬运] 窗口由 {} 搬至 {} (位置: {:?})",
+            info!(
+                "-> [Cross-screen transfer] The window is moved from {} to {} (location: {:?})",
                 old_out_name, next_out_name, hint
             );
 
@@ -337,7 +337,7 @@ impl AppState {
         let mut target_output_name: Option<String> = None;
         let mut startup_focus_found = false;
 
-        println!("-> 正在计算多显示器独立排布 (基于名称索引)...");
+        info!("-> Calculating multi-monitor independent layout (based on name index)...");
 
         // --- 第一轮：计算几何数据与名字映射 ---
         for head in &self.heads {
@@ -346,7 +346,7 @@ impl AppState {
 
             // 【修改 1】初始化 OutputData 时补全 full_area 字段
             self.outputs.entry(name.clone()).or_insert_with(|| {
-                println!("   [初始化] 发现全新显示器记录: {}", name);
+                info!("[Initialization] New monitor record found: {}", name);
                 OutputData {
                     width: 0,
                     height: 0,
@@ -361,7 +361,7 @@ impl AppState {
                         y: 0,
                         w: 0,
                         h: 0,
-                    }, // <--- 新增初始化
+                    },
                     ls_output: None,
                     tags: 1,
                     base_tag: 1,
@@ -435,8 +435,6 @@ impl AppState {
                 }
 
                 if let Some(out_data) = self.outputs.get_mut(&res.name) {
-                    // 【修改 2】同时更新 usable_area 和 full_area
-                    // 这里的坐标 (res.x, res.y) 是最准确的“房产证”坐标
                     let geometry = Geometry {
                         x: res.x,
                         y: res.y,
@@ -444,7 +442,7 @@ impl AppState {
                         h: res.h,
                     };
                     out_data.usable_area = geometry;
-                    out_data.full_area = geometry; // <--- 关键：固化全屏物理坐标
+                    out_data.full_area = geometry;
                 }
             }
         }
@@ -504,7 +502,7 @@ impl AppState {
 
         let transform = Self::parse_transform(cfg);
 
-        // 【关键修正】根据旋转角度对调物理宽高
+        // 根据旋转角度对调物理宽高
         let (log_w, _log_h) = match transform {
             Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270 => (
                 (phys_h as f64 / scale).ceil() as i32,
@@ -559,11 +557,11 @@ impl AppState {
     pub fn perform_action(&mut self, action: Action) {
         match action {
             Action::ReloadConfiguration => {
-                println!("-> 正在手动重载配置...");
+                info!("-> Reloading configuration manually...");
                 self.config = crate::config::Config::load();
                 self.needs_reload = true;
                 // self.current_keymap = None; // 启动了fcitx5的情况下重载布局会导致崩溃，
-                println!("-> 配置已重载，新的布局将在下次键盘接入或手动触发时生效");
+                info!("-> The configuration has been reloaded and the new layout will take effect the next time the keyboard is accessed or manually triggered");
             }
             Action::FocusOutput(dir) => self.cycle_output_focus(dir),
             Action::MoveToOutput(dir) => {
@@ -576,7 +574,7 @@ impl AppState {
                 // 逻辑：修改“当前活跃显示器”的真值
                 if let Some(out_id) = &self.focused_output {
                     if let Some(out_data) = self.outputs.get_mut(out_id) {
-                        println!("-> [动作] 切换显示器 {:?} 的标签至: {:b}", out_id, mask);
+                        info!("-> [Action] Switch the label of monitor {:?} to: {:b}", out_id, mask);
                         out_data.tags = mask;
                         // 同步影子变量，确保本次渲染周期内逻辑一致
                         self.focused_tags = mask;
@@ -605,12 +603,12 @@ impl AppState {
                 if cmd_list.is_empty() {
                     return;
                 }
-                println!("-> [Spawn] 启动进程: {:?}", cmd_list);
+                info!("-> [Spawn] Start process: {:?}", cmd_list);
 
                 std::process::Command::new(&cmd_list[0])
                     .args(&cmd_list[1..])
                     .spawn()
-                    .map_err(|e| eprintln!("-> Spawn 失败: {}", e))
+                    .map_err(|e| error!("-> Spawn failed: {}", e))
                     .ok();
             }
 
@@ -619,13 +617,13 @@ impl AppState {
                 if cmd_str.is_empty() {
                     return;
                 }
-                println!("-> [Shell] 执行命令: {}", cmd_str);
+                info!("-> [Shell] Execute command: {}", cmd_str);
 
                 std::process::Command::new("sh")
                     .arg("-c")
                     .arg(cmd_str)
                     .spawn()
-                    .map_err(|e| eprintln!("-> Shell 执行失败: {}", e))
+                    .map_err(|e| error!("-> Shell execution failed: {}", e))
                     .ok();
             }
             Action::Focus(dir) => {
@@ -728,8 +726,7 @@ impl AppState {
     pub fn handle_ipc_connections(&mut self) {
         if let Some(ref listener) = self.ipc_listener {
             while let Ok((mut stream, _)) = listener.accept() {
-                // println!("-> IPC: 发现新听众 (Bar/Script)");
-                // 【修正】新听众进来，立刻发送当前“精装修”后的状态
+                //info!("-> IPC: Discover new listeners (Bar/Script)");
                 let mut json = self.get_waybar_response_json();
                 json.push('\n');
                 let _ = std::io::Write::write_all(&mut stream, json.as_bytes());
@@ -881,8 +878,8 @@ impl AppState {
         if follow {
             // 我们之前在函数开头已经拿到了 out_id (String 类型)
             if let Some(out_data) = self.outputs.get_mut(&out_id) {
-                println!(
-                    "-> [跟随] 显示器 {} 视角切换至新标签掩码: {:b}",
+                info!(
+                    "-> [Follow] Monitor {} Switch perspective to new tab mask: {:b}",
                     out_id, target_mask
                 );
                 out_data.tags = target_mask;
@@ -949,8 +946,8 @@ impl AppState {
         let next_mask = 1 << next_idx;
 
         // 5. 执行搬迁，且视角跟随 (follow = true)
-        println!(
-            "-> [跨标搬运] 窗口由 Tag {} 移至 Tag {}",
+        info!(
+            "-> [Cross-tag transfer] window moved from Tag {} to Tag {}",
             current_idx + 1,
             next_idx + 1
         );
@@ -970,7 +967,7 @@ impl AppState {
         };
         // 1. 尝试在当前方向寻找邻居
         if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
-            println!("-> 发现邻居 {:?}，执行位置交换", neighbor_id);
+            info!("-> Discover neighbor {:?} and perform location exchange", neighbor_id);
             let tree_key = (out_id.clone(), self.focused_tags);
             // 执行树内交换
             if let Some(root) = self.layout_roots.get_mut(&tree_key) {
@@ -983,15 +980,15 @@ impl AppState {
             // 2. 边界判定：如果水平方向没邻居了，执行跨标签流转（bspwm 风格）
             match dir {
                 Direction::Left => {
-                    println!("-> 左边界已达，跨标签移动至上一个 Tag");
+                    info!("-> The left boundary has been reached, move across tags to the previous Tag");
                     self.move_window_relative(win_id, -1, MoveHint::Rightmost);
                 }
                 Direction::Right => {
-                    println!("-> 右边界已达，跨标签移动至下一个 Tag");
+                    info!("-> The right boundary has been reached, move across tags to the next Tag");
                     self.move_window_relative(win_id, 1, MoveHint::Leftmost);
                 }
                 _ => {
-                    println!("-> 上下边界已达，暂不处理跨标签");
+                    info!("-> The upper and lower boundaries have been reached, and cross-label processing will not be processed for the time being.");
                 }
             }
         }
@@ -1080,8 +1077,8 @@ impl AppState {
         let next_mask = 1 << next_idx;
 
         if next_mask != current_tags {
-            println!(
-                "-> [流转] 显示器 {} : Tag {} -> {}",
+            info!(
+                "-> [Transfer] Display {} : Tag {} -> {}",
                 out_id,
                 current_idx + 1,
                 next_idx + 1
@@ -1108,7 +1105,7 @@ impl AppState {
             };
 
             if let Some(win_id) = edge_win {
-                println!("-> [焦点] 进入新标签，锁定物理边缘窗口: {:?}", win_id);
+                info!("-> [Focus] Enter a new tab and lock the physical edge window: {:?}", win_id);
                 self.focused_window = Some(win_id.clone());
                 self.tag_focus_history.insert(tree_key, win_id);
             } else {
@@ -1117,8 +1114,7 @@ impl AppState {
         }
     }
 
-    /// 邻居查找，严格方向判定
-    /// 邻居查找：增加显示器隔离判定
+    /// 邻居查找
     fn find_neighbor(&self, current_id: &ObjectId, dir: Direction) -> Option<ObjectId> {
         // 1. 先拿到当前聚焦窗口的元数据，确定它属于哪个显示器
         let current_w_data = self.windows.iter().find(|w| &w.id == current_id)?;

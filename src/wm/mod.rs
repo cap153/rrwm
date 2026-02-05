@@ -43,6 +43,7 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
@@ -143,12 +144,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
         {
             match interface.as_str() {
                 "zwlr_output_manager_v1" => {
-                    println!("[ID:{}] 发现显示器管理器 (wlr-output-management)", name);
+                    info!("[ID:{}] Discovered Display Manager (wlr-output-management)", name);
                     let manager = proxy.bind::<ZwlrOutputManagerV1, _, _>(name, 4, qh, ());
                     state.output_manager = Some(manager);
                 }
                 "river_layer_shell_v1" => {
-                    println!("[ID:{}] 绑定：层级表面管理器 (Waybar 权限已开启)", name);
+                    info!("[ID:{}] Binding: Hierarchical Surface Manager (waybar/swww permission is enabled)", name);
                     let manager = proxy.bind::<RiverLayerShellV1, _, _>(name, 1, qh, ());
                     state.layer_shell_manager = Some(manager);
                 }
@@ -187,7 +188,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
         use crate::protocol::river_wm::river_window_manager_v1::Event as WmEvent;
         match event {
             WmEvent::Seat { id } => {
-                println!("-> 发现新输入设备 (Seat)");
+                info!("-> Found new input device (Seat)");
                 state.main_seat = Some(id.clone());
                 // 2. 清理点：不再手动注册默认键，而是统一调用 binds 模块
                 // 它会自动处理 TOML 配置或使用保底默认值
@@ -197,7 +198,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 // 默认分配到当前活跃显示器，如果没有活跃显示器，就暂时不分配
                 let current_out = state.focused_output.clone();
                 // 仅预登记，不执行切割，也不分配焦点
-                println!("-> 发现新窗口，等待分配 AppId: {:?}", id.id());
+                info!("-> Found new window, waiting to be assigned AppId: {:?}", id.id());
                 state.windows.push(WindowData {
                     id: id.id(),
                     window: id.clone(),
@@ -215,7 +216,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 // --- 新增：物理焦点生效逻辑 ---
                 if let Some((x, y)) = state.pending_pointer_warp.take() {
                     if let Some(seat) = &state.main_seat {
-                        println!("-> [物理焦点] 正在管理序列内执行鼠标瞬移: {},{}", x, y);
+                        info!("-> [Physics Focus] Executing mouse teleport within management sequence: {},{}", x, y);
                         seat.pointer_warp(x, y);
                     }
                 }
@@ -224,8 +225,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 if let Some(out_id) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(out_id) {
                         // 打印日志，看看当前活跃屏幕是谁，它认为自己在看哪个 Tag
-                        println!(
-                            "-> [渲染检查] 活跃屏幕: {:?}, 标签掩码: {:b}",
+                        info!(
+                            "-> [Rendering Check] Active screen: {:?}, Tag mask: {:b}",
                             out_id, out_data.tags
                         );
                         state.focused_tags = out_data.tags;
@@ -302,10 +303,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                // 5. 【核心修改】布局计算：遍历所有显示器，各算各的树
+                // 5. 布局计算：遍历所有显示器，各算各的树
                 state.last_geometry.clear(); // 清空旧的几何记录，准备重新记录
 
-                // 重点：这里不再用 .next()，而是迭代所有的 outputs
+                // 这里不再用 .next()，而是迭代所有的 outputs
                 for (out_id, out_data) in &state.outputs {
                     // 使用 out_data.tags 而不是全局的 state.focused_tags
                     let tree_key = (out_id.clone(), out_data.tags);
@@ -367,7 +368,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
             }
 
             WmEvent::Output { id } => {
-                println!("-> 发现新物理输出接口: {:?}", id.id());
+                info!("-> Found new physical output interface: {:?}", id.id());
                 // --- 绑定 LayerShell 输出对象 ---
                 if let Some(ls_mgr) = &state.layer_shell_manager {
                     // 创建监听对象并放入暂存区
@@ -395,7 +396,7 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
     ) {
         match event {
             OutEvent::Dimensions { width, height } => {
-                println!("-> [硬件层] 收到物理分辨率信号: {}x{}", width, height);
+                info!("-> [Hardware] Received physical resolution signal: {}x{}", width, height);
                 if let Some(wm) = &state.river_wm {
                     wm.manage_dirty();
                 }
@@ -431,7 +432,7 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                 if let Some(name) = found_name {
                     // 只有当显示器真的变了，才执行切换，避免日志刷屏
                     if state.focused_output.as_ref() != Some(&name) {
-                        println!("-> [焦点] 鼠标跨越物理边界，自动锁定显示器: {}", name);
+                        info!("-> [Focus] The mouse crosses the physical boundary and automatically locks the monitor: {}", name);
                         state.focused_output = Some(name);
                         if let Some(wm) = &state.river_wm {
                             wm.manage_dirty();
@@ -442,7 +443,7 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
 
             SeatEvent::WindowInteraction { window } => {
                 let id = window.id();
-                println!("-> 鼠标点击窗口: {:?}", id);
+                info!("-> Mouse click window: {:?}", id);
                 state.focused_window = Some(id.clone());
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
                     state.focused_window = Some(id.clone());
@@ -515,7 +516,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
             }
             WinEvent::AppId { app_id } => {
                 let id = proxy.id();
-                println!("-> 窗口 ID {:?} 获得 AppId: {:?}", id, app_id);
+                info!("-> Window ID {:?} gets AppId: {:?}", id, app_id);
 
                 // 1. 更新内存里的 app_id 并确定归属显示器
                 let mut out_id_to_use = None;
@@ -660,7 +661,7 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
 
             // --- 核心重载逻辑 ---
             if state.needs_reload {
-                println!("-> 执行快捷键热重载...");
+                info!("-> Perform shortcut hot reload...");
                 // 1. 销毁旧对象：告诉 River 别再监听这些按键了
                 // drain(..) 会清空数组并返回里面的元素
                 for kb in state.key_bindings.drain(..) {
@@ -674,7 +675,7 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
                     wm.manage_dirty();
                 }
                 state.needs_reload = false;
-                println!("-> 热重载完成！");
+                info!("-> Hot reload completed!");
             }
         }
     }
@@ -707,7 +708,7 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
                 .as_ref()
                 .and_then(|i| i.keyboard.as_ref())
             {
-                println!("-> 首次发现硬件，生成布局映射: {}...", kb_cfg.layout);
+                info!("-> Discover hardware for the first time and generate layout mapping: {}...", kb_cfg.layout);
 
                 let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
                 let rules = "evdev".to_string();
@@ -800,8 +801,8 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
 
                 if let Some(name) = matched_name {
                     if let Some(out_data) = state.outputs.get_mut(&name) {
-                        println!(
-                            "-> [Bar占位] 显示器 {} 预留空间: {}x{} @ {},{}",
+                        info!(
+                            "-> [Bar space] Display {} reserved space: {}x{} @ {},{}",
                             name, width, height, x, y
                         );
                         out_data.usable_area = Geometry {
@@ -816,8 +817,8 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
                         }
                     }
                 } else {
-                    println!(
-                        "-> [Bar] 收到预留请求 {}x{} @ {},{} 但未匹配到显示器 (可能尚未配置)",
+                    warn!(
+                        "-> [Bar] Reservation request {}x{} @ {},{} received but no display matched (probably not configured yet)",
                         width, height, x, y
                     );
                 }
@@ -848,7 +849,7 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for AppState {
             }
             MgrEvent::Done { serial } => {
                 state.last_output_serial = serial; // 记住这个号，以后热重载要用
-                println!("-> 显示器硬件报告完毕 (Serial: {})", serial);
+                info!("-> Monitor hardware report completed (Serial: {})", serial);
                 state.apply_output_configs(qh, serial);
             }
             _ => {}
@@ -941,10 +942,6 @@ impl Dispatch<ZwlrOutputModeV1, ()> for AppState {
                 return;
             }
         }
-
-        // 如果是第一次见到的模式对象，根据 XML 协议，mode 对象是在 Head 接口下创建的
-        // 这里简化处理：因为 generate_client_code 已经帮我们处理了层级
-        // 我们在 HeadEvent::Mode 里预创建 ModeInfo 会更优雅。
     }
 }
 
@@ -960,14 +957,14 @@ impl Dispatch<ZwlrOutputConfigurationV1, ()> for AppState {
     ) {
         match event {
             ConfigResEvent::Succeeded => {
-                println!("-> [成功] 显示器配置已生效，正在刷新布局...");
+                info!("-> [Success] The display configuration has taken effect and the layout is being refreshed...");
                 // 强行触发一次 ManageStart，让 BSP 树重新计算
                 if let Some(wm) = &state.river_wm {
                     wm.manage_dirty();
                 }
             }
-            ConfigResEvent::Failed => eprintln!("-> [失败] River 拒绝了该显示器配置"),
-            ConfigResEvent::Cancelled => eprintln!("-> [取消] 配置由于硬件热插拔已失效，请重试"),
+            ConfigResEvent::Failed => error!("-> [FAILED] River rejected this monitor configuration"),
+            ConfigResEvent::Cancelled => error!("-> [Cancel] The configuration has expired due to hardware hot swap, please try again."),
         }
     }
 }
@@ -983,7 +980,7 @@ impl Dispatch<RiverInputDeviceV1, ()> for AppState {
     ) {
         match event {
             InputDeviceEvent::Name { name } => {
-                println!("-> 发现输入设备名称: ID {:?} = {}", proxy.id(), name);
+                info!("-> Found input device name: ID {:?} = {}", proxy.id(), name);
                 state.device_names.insert(proxy.id(), name);
             }
             _ => {}
@@ -1013,14 +1010,14 @@ impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
 
                 // 2. 黑名单过滤：如果是虚拟键盘，直接忽略
                 if name_lower.contains("fcitx") || name_lower.contains("virtual") {
-                    println!("-> [忽略] 检测到虚拟键盘: {} (ID: {:?})", name, proxy.id());
+                    info!("-> [Ignore] Virtual keyboard detected: {} (ID: {:?})", name, proxy.id());
                     // 甚至可以从 state.keyboards 里把它删掉，免得以后误伤
                     state.keyboards.retain(|k| k.id() != proxy.id());
                     return;
                 }
 
-                println!(
-                    "-> [配置] 检测到物理键盘: {} (ID: {:?})，应用布局...",
+                info!(
+                    "-> [Configuration] Physical keyboard detected: {} (ID: {:?}), applying layout...",
                     name,
                     proxy.id()
                 );

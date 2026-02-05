@@ -1,8 +1,7 @@
-// src/wm/binds.rs
-
 use crate::protocol::river_wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocol::river_xkb::river_xkb_bindings_v1::RiverXkbBindingsV1;
 use crate::wm::{actions::Action, AppState, KeyBinding};
+use log::{error, info, warn};
 use wayland_client::QueueHandle;
 use xkbcommon::xkb;
 
@@ -19,7 +18,7 @@ fn parse_mod_group(group: &str) -> Modifiers {
             "ctrl" | "control" => mask |= Modifiers::Ctrl,
             "alt" | "mod1" => mask |= Modifiers::Mod1,
             "super" | "mod4" | "logo" => mask |= Modifiers::Mod4,
-            _ => println!("警告：未知的修饰符标签 {}", p),
+            _ => warn!("警告：未知的修饰符标签 {}", p),
         }
     }
     mask
@@ -48,8 +47,8 @@ fn commit_binding(
 
     // 3. 最终检查，如果还是找不到，则报错并跳过
     if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
-        eprintln!(
-            "-> [快捷键错误] 无法识别按键名称: '{}'，请检查 TOML 配置中名称是否正确",
+        error!(
+            "-> [Shortcut key error] Unable to recognize the key name: '{}', please check whether the name in the TOML configuration is correct",
             key_name
         );
         return;
@@ -113,7 +112,7 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
     };
 
     if let Some(entries) = state.config.keybindings.clone() {
-        println!("-> 正在从配置文件注册快捷键...");
+        info!("-> Registering shortcut keys from configuration file...");
         for (key_or_mod, entry) in &entries {
             process_entry(
                 state,
@@ -126,7 +125,7 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
             );
         }
     } else {
-        println!("-> 未发现快捷键配置，加载默认 Colemak 导航键位...");
+        warn!("-> 未发现快捷键配置，加载默认 Colemak 导航键位...");
         let defaults = crate::config::get_default_bindings();
         for b in defaults {
             commit_binding(state, &xkb_mgr, &seat, qh, b.key, b.mods, vec![b.action]);

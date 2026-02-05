@@ -1,3 +1,4 @@
+use log::{error, info};
 pub mod config;
 pub mod protocol;
 pub mod wm;
@@ -10,6 +11,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use wayland_client::Connection;
 
 fn main() {
+    // 使用默认配置，它会自动读取 RUST_LOG 环境变量
+    env_logger::init();
     // 获取命令行参数
     let args: Vec<String> = std::env::args().collect();
     // 判定是否进入“客户端状态模式”
@@ -19,7 +22,7 @@ fn main() {
     }
 
     let config = Config::load();
-    let conn = Connection::connect_to_env().expect("请在 River 环境下运行");
+    let conn = Connection::connect_to_env().expect("Please run in River environment");
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
@@ -29,13 +32,13 @@ fn main() {
     let socket_path = format!("/tmp/rrwm-{}.sock", display_name);
     // 如果之前程序崩溃留下了旧文件，先删掉它，否则会绑定失败
     let _ = fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).expect("无法创建 IPC Socket");
+    let listener = UnixListener::bind(&socket_path).expect("Unable to create IPC Socket");
     // 设置为非阻塞模式，这样我们检查新连接时才不会卡住整个 WM
     listener
         .set_nonblocking(true)
-        .expect("无法设置 Socket 非阻塞");
+        .expect("Unable to set Socket non-blocking");
 
-    println!("-> IPC 电台已在 {:?} 启动", socket_path);
+    info!("-> IPC radio started at {:?}", socket_path);
 
     let mut state = AppState {
         config: config,
@@ -72,11 +75,11 @@ fn main() {
     };
 
     let _registry = display.get_registry(&qh, ());
-    println!("rrwm 已启动，正在监听事件...");
+    info!("rrwm has started and is listening for events...");
 
     loop {
         if let Err(e) = event_queue.blocking_dispatch(&mut state) {
-            eprintln!("Wayland 连接发生致命错误: {:?}", e);
+            error!("Wayland connection fatal error: {:?}", e);
             // 可以在这里打印更详细的 state 信息
             break;
         }
@@ -99,7 +102,7 @@ fn run_status_client() {
             line.clear();
         }
     } else {
-        eprintln!("错误：无法连接到 rrwm Socket，请确保 rrwm 正在运行。");
+        error!("Unable to connect to rrwm Socket, please ensure rrwm is running.");
         std::process::exit(1);
     }
 }

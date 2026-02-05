@@ -1,8 +1,9 @@
 use crate::protocol::river_wm::river_seat_v1::Modifiers;
 use crate::wm::actions::Action;
 use crate::wm::layout::Direction;
+use log::{error, info, warn};
 use serde::Deserialize;
-use std::collections::HashMap; // 修复点 1：引入 HashMap
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -79,7 +80,7 @@ pub struct Config {
 impl Config {
     /// 获取配置文件路径：~/.config/river/rrwm.toml
     pub fn get_path() -> PathBuf {
-        let home = std::env::var("HOME").expect("找不到 HOME 环境变量");
+        let home = std::env::var("HOME").expect("The HOME environment variable was not found.");
         PathBuf::from(home)
             .join(".config")
             .join("river")
@@ -93,15 +94,15 @@ impl Config {
         if let Ok(content) = fs::read_to_string(&path) {
             match toml::from_str::<Config>(&content) {
                 Ok(config) => {
-                    println!("-> 已加载配置文件: {:?}", path);
+                    info!("-> Configuration file loaded: {:?}", path);
                     return config;
                 }
                 Err(e) => {
-                    eprintln!("-> 配置文件解析失败: {}，将使用默认设置", e);
+                    error!("-> Configuration file parsing failed: {}, Default settings will be used", e);
                 }
             }
         } else {
-            println!("-> 未找到配置文件 {:?}，将使用默认设置", path);
+            warn!("-> Configuration file not found {:?}，Default settings will be used", path);
         }
 
         // 修复点 2：补全 keybindings 字段初始化
