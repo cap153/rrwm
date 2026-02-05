@@ -562,7 +562,7 @@ impl AppState {
                 println!("-> 正在手动重载配置...");
                 self.config = crate::config::Config::load();
                 self.needs_reload = true;
-                self.current_keymap = None;
+                // self.current_keymap = None; // 启动了fcitx5的情况下重载布局会导致崩溃，
                 println!("-> 配置已重载，新的布局将在下次键盘接入或手动触发时生效");
             }
             Action::FocusOutput(dir) => self.cycle_output_focus(dir),
