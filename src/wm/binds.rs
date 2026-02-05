@@ -26,6 +26,8 @@ fn parse_mod_group(group: &str) -> Modifiers {
 }
 
 /// 辅助函数：真正向 River 注册绑定并存入 state
+// src/wm/binds.rs
+
 fn commit_binding(
     state: &mut AppState,
     mgr: &RiverXkbBindingsV1,
@@ -35,12 +37,30 @@ fn commit_binding(
     mods: Modifiers,
     actions: Vec<Action>,
 ) {
-    let keysym = xkb::keysym_from_name(key_name, xkb::KEYSYM_NO_FLAGS).raw();
-    let binding_obj = mgr.get_xkb_binding(seat, keysym, mods, qh, ());
+    // 1. 尝试按原样查找 (例如 "Return", "space", "BackSpace")
+    let mut keysym = xkb::keysym_from_name(key_name, xkb::KEYSYM_NO_FLAGS);
+
+    // 2. 如果没找到 (返回 KEY_NoSymbol)，尝试转为全小写再找一次
+    // 注意这里使用 .raw() 和 xkb::keysyms::KEY_NoSymbol
+    if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
+        keysym = xkb::keysym_from_name(&key_name.to_lowercase(), xkb::KEYSYM_NO_FLAGS);
+    }
+
+    // 3. 最终检查，如果还是找不到，则报错并跳过
+    if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
+        eprintln!(
+            "-> [快捷键错误] 无法识别按键名称: '{}'，请检查 TOML 配置中名称是否正确",
+            key_name
+        );
+        return;
+    }
+
+    // 注册绑定
+    let binding_obj = mgr.get_xkb_binding(seat, keysym.raw(), mods, qh, ());
 
     state.key_bindings.push(KeyBinding {
         obj: binding_obj,
-        actions, // <--- 修正：存入 Vec<Action>
+        actions,
     });
 }
 
