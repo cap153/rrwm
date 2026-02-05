@@ -2,9 +2,9 @@
 
 [input.keyboard]
 layout = "us"
-variant = "colemak"
+variant = "colemak" # 默认qwerty
 # options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
-model = "pc105" # 一般可选，默认 pc105
+model = "pc105" # 默认pc105
 
 [waybar]
 tag_icons = ["", "", "󰃽", "", "", "󰙯", "", "󰎄", "", "", "", "󰊴", "", "", "󰆍", "", "", "", "", "󰘦", "", "󰗨"]
@@ -12,6 +12,7 @@ focused_style = "<span color='#bd93f9'>"
 occupied_style = "<span color='#6C7086'>"
 empty_style = "<span color='#313244'>"
 
+# 可以使用wev来查询特定的按键对应的XKB名称
 [keybindings.alt]
 # 关闭聚焦窗口
 q = { action = "close_focused" }
@@ -43,7 +44,7 @@ Return = { action = "spawn", args = ["ghostty"] }
 
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
-# 重载配置
+# 重载配置(插拔显示器可能会导致waybar重叠，可以尝试重启waybar)
 c = [
 	{ action = "reload_configuration" },
 	{ action = "spawn", args = ["pkill", "waybar"] },
@@ -68,13 +69,21 @@ e = { action = "move", args = ["down"] }
 
 # 如果想使用加号连接多重修饰符，需要加引号
 [keybindings."super+shift"]
-Space = { action = "spawn", args = ["wezterm"] }
+space = { action = "spawn", args = ["neovide"] }
 
 # 没有修饰符的按键
 [keybindings]
-F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
+F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
 [keybindings.none]
-F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
+F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
+# 音量控制，这里的wpctl是wireplumber包中附带的
+XF86AudioRaiseVolume = { action = "shell", cmd = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1+" }
+XF86AudioLowerVolume = { action = "shell", cmd = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1-" }
+XF86AudioMute        = { action = "shell", cmd = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle" }
+XF86AudioMicMute     = { action = "shell", cmd = "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle" }
+# 亮度控制，brightnessctl 有独立的包
+XF86MonBrightnessUp   = { action = "spawn", args = ["brightnessctl", "--class=backlight", "set", "+10%"] }
+XF86MonBrightnessDown = { action = "spawn", args = ["brightnessctl", "--class=backlight", "set", "10%-"] }
 
 # 多显示器之间切换焦点
 [keybindings.alt_ctrl]
