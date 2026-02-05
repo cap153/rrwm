@@ -144,7 +144,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
         {
             match interface.as_str() {
                 "zwlr_output_manager_v1" => {
-                    info!("[ID:{}] Discovered Display Manager (wlr-output-management)", name);
+                    info!(
+                        "[ID:{}] Discovered Display Manager (wlr-output-management)",
+                        name
+                    );
                     let manager = proxy.bind::<ZwlrOutputManagerV1, _, _>(name, 4, qh, ());
                     state.output_manager = Some(manager);
                 }
@@ -198,7 +201,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 // 默认分配到当前活跃显示器，如果没有活跃显示器，就暂时不分配
                 let current_out = state.focused_output.clone();
                 // 仅预登记，不执行切割，也不分配焦点
-                info!("-> Found new window, waiting to be assigned AppId: {:?}", id.id());
+                info!(
+                    "-> Found new window, waiting to be assigned AppId: {:?}",
+                    id.id()
+                );
                 state.windows.push(WindowData {
                     id: id.id(),
                     window: id.clone(),
@@ -396,7 +402,10 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
     ) {
         match event {
             OutEvent::Dimensions { width, height } => {
-                info!("-> [Hardware] Received physical resolution signal: {}x{}", width, height);
+                info!(
+                    "-> [Hardware] Received physical resolution signal: {}x{}",
+                    width, height
+                );
                 if let Some(wm) = &state.river_wm {
                     wm.manage_dirty();
                 }
@@ -708,7 +717,10 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
                 .as_ref()
                 .and_then(|i| i.keyboard.as_ref())
             {
-                info!("-> Discover hardware for the first time and generate layout mapping: {}...", kb_cfg.layout);
+                info!(
+                    "-> Discover hardware for the first time and generate layout mapping: {}...",
+                    kb_cfg.layout
+                );
 
                 let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
                 let rules = "evdev".to_string();
@@ -1010,7 +1022,11 @@ impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
 
                 // 2. 黑名单过滤：如果是虚拟键盘，直接忽略
                 if name_lower.contains("fcitx") || name_lower.contains("virtual") {
-                    info!("-> [Ignore] Virtual keyboard detected: {} (ID: {:?})", name, proxy.id());
+                    info!(
+                        "-> [Ignore] Virtual keyboard detected: {} (ID: {:?})",
+                        name,
+                        proxy.id()
+                    );
                     // 甚至可以从 state.keyboards 里把它删掉，免得以后误伤
                     state.keyboards.retain(|k| k.id() != proxy.id());
                     return;
@@ -1025,6 +1041,23 @@ impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
                 // 3. 只有通过检查的，才应用布局
                 if let Some(keymap) = &state.current_keymap {
                     proxy.set_keymap(keymap);
+                }
+                // --- 应用 Numlock 设置 ---
+                if let Some(kb_cfg) = state
+                    .config
+                    .input
+                    .as_ref()
+                    .and_then(|i| i.keyboard.as_ref())
+                {
+                    if let Some(nl) = &kb_cfg.numlock {
+                        if nl == "true" {
+                            proxy.numlock_enable();
+                            info!("-> [Keyboard] {} Numlock is on", name);
+                        } else if nl == "false" {
+                            proxy.numlock_disable();
+                            info!("-> [Keyboard] {} Numlock turned off", name);
+                        }
+                    }
                 }
             }
 

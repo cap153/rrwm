@@ -5,6 +5,7 @@ layout = "us"
 variant = "colemak" # 默认qwerty
 # options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
 model = "pc105" # 默认pc105
+numlock = "true" # 默认关闭小键盘
 
 [waybar]
 tag_icons = ["", "", "󰃽", "", "", "󰙯", "", "󰎄", "", "", "", "󰊴", "", "", "󰆍", "", "", "", "", "󰘦", "", "󰗨"]
@@ -76,12 +77,12 @@ space = { action = "spawn", args = ["neovide"] }
 F1 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ -5%" }
 [keybindings.none]
 F2 = { action = "shell", cmd = "pactl set-sink-volume @DEFAULT_SINK@ +5%" }
-# 音量控制，这里的wpctl是wireplumber包中附带的
+# 音量控制，这里的wpctl是wireplumber附带的
 XF86AudioRaiseVolume = { action = "shell", cmd = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1+" }
 XF86AudioLowerVolume = { action = "shell", cmd = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1-" }
 XF86AudioMute        = { action = "shell", cmd = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle" }
 XF86AudioMicMute     = { action = "shell", cmd = "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle" }
-# 亮度控制，brightnessctl 有独立的包
+# 亮度控制
 XF86MonBrightnessUp   = { action = "spawn", args = ["brightnessctl", "--class=backlight", "set", "+10%"] }
 XF86MonBrightnessDown = { action = "spawn", args = ["brightnessctl", "--class=backlight", "set", "10%-"] }
 

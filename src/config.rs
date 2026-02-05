@@ -40,6 +40,7 @@ pub struct KeyboardConfig {
     pub variant: Option<String>,
     pub options: Option<String>,
     pub model: Option<String>,
+    pub numlock: Option<String>,
 }
 
 // 2. 对应 [input] 部分
