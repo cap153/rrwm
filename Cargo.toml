@@ -2,6 +2,7 @@
 name = "rrwm"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 # Wayland 客户端核心库
