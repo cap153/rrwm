@@ -34,6 +34,7 @@ enum MoveHint {
 #[derive(Debug, Clone)]
 pub enum Action {
     CloseFocused,
+    ToggleFullscreen,
     Focus(Direction),
     FocusTag(u32),           // 切换到某个标签掩码
     MoveToTag(u32),          // 将窗口移动到某个标签掩码
@@ -51,6 +52,8 @@ impl Action {
         match name.to_lowercase().as_str() {
             // --- 内部指令：关闭窗口 ---
             "close_window" | "close_focused" => Action::CloseFocused,
+            // --- 内部指令：全屏切换 ---
+            "fullscreen" | "toggle_fullscreen" => Action::ToggleFullscreen,
             // --- 内部指令：重载配置 ---
             "reload_configuration" => Action::ReloadConfiguration,
             // --- 内部指令：焦点切换 ---
@@ -556,6 +559,23 @@ impl AppState {
 
     pub fn perform_action(&mut self, action: Action) {
         match action {
+            Action::ToggleFullscreen => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                        // 1. 切换内存状态
+                        w.is_fullscreen = !w.is_fullscreen;
+                        info!(
+                            "-> [Action] Toggle fullscreen state for window {:?}: {}",
+                            f_id, w.is_fullscreen
+                        );
+
+                        // 2. 告诉 River 我们状态变了，请尽快发起 ManageStart 让我们执行渲染
+                        if let Some(wm) = &self.river_wm {
+                            wm.manage_dirty();
+                        }
+                    }
+                }
+            }
             Action::ReloadConfiguration => {
                 info!("-> Reloading configuration manually...");
                 self.config = crate::config::Config::load();
@@ -574,7 +594,10 @@ impl AppState {
                 // 逻辑：修改“当前活跃显示器”的真值
                 if let Some(out_id) = &self.focused_output {
                     if let Some(out_data) = self.outputs.get_mut(out_id) {
-                        info!("-> [Action] Switch the label of monitor {:?} to: {:b}", out_id, mask);
+                        info!(
+                            "-> [Action] Switch the label of monitor {:?} to: {:b}",
+                            out_id, mask
+                        );
                         out_data.tags = mask;
                         // 同步影子变量，确保本次渲染周期内逻辑一致
                         self.focused_tags = mask;
@@ -967,7 +990,10 @@ impl AppState {
         };
         // 1. 尝试在当前方向寻找邻居
         if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
-            info!("-> Discover neighbor {:?} and perform location exchange", neighbor_id);
+            info!(
+                "-> Discover neighbor {:?} and perform location exchange",
+                neighbor_id
+            );
             let tree_key = (out_id.clone(), self.focused_tags);
             // 执行树内交换
             if let Some(root) = self.layout_roots.get_mut(&tree_key) {
@@ -984,7 +1010,9 @@ impl AppState {
                     self.move_window_relative(win_id, -1, MoveHint::Rightmost);
                 }
                 Direction::Right => {
-                    info!("-> The right boundary has been reached, move across tags to the next Tag");
+                    info!(
+                        "-> The right boundary has been reached, move across tags to the next Tag"
+                    );
                     self.move_window_relative(win_id, 1, MoveHint::Leftmost);
                 }
                 _ => {
@@ -1105,7 +1133,10 @@ impl AppState {
             };
 
             if let Some(win_id) = edge_win {
-                info!("-> [Focus] Enter a new tab and lock the physical edge window: {:?}", win_id);
+                info!(
+                    "-> [Focus] Enter a new tab and lock the physical edge window: {:?}",
+                    win_id
+                );
                 self.focused_window = Some(win_id.clone());
                 self.tag_focus_history.insert(tree_key, win_id);
             } else {

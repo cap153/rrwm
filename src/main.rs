@@ -72,6 +72,7 @@ fn main() {
         last_sent_json: String::new(),
         anonymous_ls_outputs: Vec::new(),
         wl_name_to_monitor_name: HashMap::new(),
+        active_river_outputs: Vec::new(),
     };
 
     let _registry = display.get_registry(&qh, ());

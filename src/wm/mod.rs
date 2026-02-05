@@ -78,6 +78,7 @@ pub struct WindowData {
     pub tags: u32,
     pub app_id: Option<String>,
     pub output: Option<String>,
+    pub is_fullscreen: bool,
 }
 
 pub struct ModeInfo {
@@ -92,6 +93,14 @@ pub struct HeadInfo {
     pub name: String,
     pub modes: Vec<ModeInfo>,
     pub current_mode: Option<ObjectId>, // 记录当前生效的是哪个模式
+}
+
+pub struct RiverOutputInfo {
+    pub obj: crate::protocol::river_wm::river_output_v1::RiverOutputV1,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
 }
 
 pub struct AppState {
@@ -126,6 +135,7 @@ pub struct AppState {
     pub last_sent_json: String,
     pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
     pub wl_name_to_monitor_name: HashMap<u32, String>,
+    pub active_river_outputs: Vec<RiverOutputInfo>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -212,6 +222,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     tags: state.focused_tags, // 预分配到当前标签
                     app_id: None,
                     output: current_out,
+                    is_fullscreen: false,
                 });
             }
             WmEvent::ManageStart => {
@@ -271,7 +282,41 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             .map(|w| w.id.clone());
                     }
                 }
+                // --- 遍历所有窗口，根据 is_fullscreen 标志，强制同步 Wayland 状态 ---
+                for w in &state.windows {
+                    if w.is_fullscreen {
+                        // 坐标匹配法
+                        // 1. 获取窗口当前所在显示器的“身份证”名字
+                        let mut target_river_output = None;
+                        if let Some(out_name) = &w.output {
+                            // 2. 查阅身份证，获取其物理坐标 (full_area.x, full_area.y)
+                            // 注意：必须用 full_area (显示器原点)，不能用 usable_area (可能被 Waybar 挤占了)
+                            if let Some(out_data) = state.outputs.get(out_name) {
+                                let target_x = out_data.full_area.x;
+                                let target_y = out_data.full_area.y;
 
+                                // 3. 在“活人箱子”里寻找坐标完全一致的 RiverOutputV1 对象
+                                if let Some(info) = state
+                                    .active_river_outputs
+                                    .iter()
+                                    .find(|i| i.x == target_x && i.y == target_y)
+                                {
+                                    target_river_output = Some(info.obj.clone());
+                                }
+                            }
+                        }
+
+                        // 4. 如果找到了真身，执行全屏；如果没找到（比如屏幕刚拔掉），则不做操作防崩
+                        if let Some(out_obj) = target_river_output {
+                            w.window.fullscreen(&out_obj);
+                            w.window.inform_fullscreen();
+                        }
+                    } else {
+                        // 如果不是全屏，强制退出全屏（确保状态同步）
+                        w.window.exit_fullscreen();
+                        w.window.inform_not_fullscreen();
+                    }
+                }
                 // 3. 显隐控制：遍历所有窗口
                 for w_data in &state.windows {
                     if let Some(ref app_id) = w_data.app_id {
@@ -375,6 +420,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
             WmEvent::Output { id } => {
                 info!("-> Found new physical output interface: {:?}", id.id());
+                // 先初始化为 0，等待后续 Dimensions/Position 事件更新
+                state.active_river_outputs.push(RiverOutputInfo {
+                    obj: id.clone(),
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                });
                 // --- 绑定 LayerShell 输出对象 ---
                 if let Some(ls_mgr) = &state.layer_shell_manager {
                     // 创建监听对象并放入暂存区
@@ -391,26 +444,53 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 }
 
 // --- 3. 监听 RiverOutputV1 (分辨率) ---
+// [impl Dispatch<RiverOutputV1, ()> for AppState]
 impl Dispatch<RiverOutputV1, ()> for AppState {
     fn event(
         state: &mut Self,
-        _proxy: &RiverOutputV1,
+        proxy: &RiverOutputV1,
         event: OutEvent,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        match event {
-            OutEvent::Dimensions { width, height } => {
-                info!(
-                    "-> [Hardware] Received physical resolution signal: {}x{}",
-                    width, height
-                );
-                if let Some(wm) = &state.river_wm {
-                    wm.manage_dirty();
+        // 1. 找到列表中对应的那个 info
+        if let Some(info) = state
+            .active_river_outputs
+            .iter_mut()
+            .find(|i| i.obj.id() == proxy.id())
+        {
+            match event {
+                OutEvent::Dimensions { width, height } => {
+                    info!(
+                        "-> [Hardware] Output {:?} resolution: {}x{}",
+                        proxy.id(),
+                        width,
+                        height
+                    );
+                    info.w = width;
+                    info.h = height;
+                    if let Some(wm) = &state.river_wm {
+                        wm.manage_dirty();
+                    }
                 }
+                OutEvent::Position { x, y } => {
+                    // --- 记录坐标，用于匹配名字 ---
+                    info.x = x;
+                    info.y = y;
+                }
+                OutEvent::Removed => {
+                    proxy.destroy();
+                }
+                _ => {}
             }
-            _ => {}
+        }
+
+        // 单独处理移除逻辑，避免 borrow checker 问题
+        if let OutEvent::Removed = event {
+            state
+                .active_river_outputs
+                .retain(|i| i.obj.id() != proxy.id());
         }
     }
 }
@@ -618,6 +698,34 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                     if let Some(seat) = &state.main_seat {
                         seat.focus_window(proxy);
+                    }
+                }
+            }
+            // --- 处理全屏请求 ---
+            WinEvent::FullscreenRequested { output: _ } => {
+                // 注：虽然应用可能建议了 output，但为了稳健，我们强制它在当前所在的显示器全屏
+                // 这样可以避免应用瞎指挥导致窗口跳到别的屏幕去
+                let id = proxy.id();
+                info!("-> [Event] Window {:?} requested Fullscreen (F11)", id);
+
+                if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
+                    // 1. 只更新意图状态
+                    w.is_fullscreen = true;
+                    // 2. 请求调度
+                    if let Some(wm) = &state.river_wm {
+                        wm.manage_dirty();
+                    }
+                }
+            }
+            // --- 处理退出全屏请求 ---
+            WinEvent::ExitFullscreenRequested => {
+                let id = proxy.id();
+                info!("-> [Event] Window {:?} requested Exit Fullscreen", id);
+
+                if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
+                    w.is_fullscreen = false;
+                    if let Some(wm) = &state.river_wm {
+                        wm.manage_dirty();
                     }
                 }
             }

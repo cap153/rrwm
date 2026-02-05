@@ -17,6 +17,7 @@ empty_style = "<span color='#313244'>"
 [keybindings.alt]
 # 关闭聚焦窗口
 q = { action = "close_focused" }
+f = { action = "toggle_fullscreen" }
 # 不同标签之间焦点切换
 1 = { action = "focus", args = ["1"] }
 2 = { action = "focus", args = ["2"] }
