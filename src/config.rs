@@ -61,6 +61,7 @@ pub struct ActiveConfig {
 pub struct WindowConfig {
     #[serde(alias = "smart-borders", default)]
     pub smart_borders: String,
+    pub gaps: Option<String>,
     pub active: Option<ActiveConfig>,
 }
 
