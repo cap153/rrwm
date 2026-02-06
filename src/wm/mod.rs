@@ -40,7 +40,7 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
@@ -245,7 +245,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 if let Some(out_id) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(out_id) {
                         // 打印日志，看看当前活跃屏幕是谁，它认为自己在看哪个 Tag
-                        info!(
+                        debug!(
                             "-> [Rendering Check] Active screen: {:?}, Tag mask: {:b}",
                             out_id, out_data.tags
                         );
@@ -286,19 +286,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
                 // --- 遍历所有窗口，根据 is_fullscreen 标志，强制同步 Wayland 状态 ---
-                for w in &state.windows {
+                for w in state.windows.iter_mut() {
                     if w.is_fullscreen {
-                        // 坐标匹配法
-                        // 1. 获取窗口当前所在显示器的“身份证”名字
                         let mut target_river_output = None;
                         if let Some(out_name) = &w.output {
-                            // 2. 查阅身份证，获取其物理坐标 (full_area.x, full_area.y)
-                            // 注意：必须用 full_area (显示器原点)，不能用 usable_area (可能被 Waybar 挤占了)
                             if let Some(out_data) = state.outputs.get(out_name) {
                                 let target_x = out_data.full_area.x;
                                 let target_y = out_data.full_area.y;
-
-                                // 3. 在“活人箱子”里寻找坐标完全一致的 RiverOutputV1 对象
                                 if let Some(info) = state
                                     .active_river_outputs
                                     .iter()
@@ -308,16 +302,17 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 }
                             }
                         }
-
-                        // 4. 如果找到了真身，执行全屏；如果没找到（比如屏幕刚拔掉），则不做操作防崩
                         if let Some(out_obj) = target_river_output {
                             w.window.fullscreen(&out_obj);
                             w.window.inform_fullscreen();
+                            w.last_proposed_w = 0;
+                            w.last_proposed_h = 0;
                         }
                     } else {
-                        // 如果不是全屏，强制退出全屏（确保状态同步）
                         w.window.exit_fullscreen();
                         w.window.inform_not_fullscreen();
+                        w.last_proposed_w = 0;
+                        w.last_proposed_h = 0;
                     }
                 }
                 // 3. 显隐控制：遍历所有窗口
@@ -355,11 +350,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 // 这模拟了用户的“切换焦点”操作，能有效治愈 Electron/mpv 的尺寸冻结症
                                 if w_data.layout_retry_count > 0 {
                                     if w_data.layout_retry_count % 2 != 0 {
-                                        // info!("奇数次：假装失去焦点");
+                                        debug!("Odd times: Pretending to lose focus");
                                         // 奇数次：假装失去焦点
                                         seat.clear_focus();
                                     } else {
-                                        // info!("偶数次：重新获得焦点");
+                                        debug!("Even times: regain focus");
                                         // 偶数次：重新获得焦点
                                         seat.focus_window(&w_data.window);
                                     }
@@ -474,6 +469,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                                 if w_data.last_proposed_w != final_w
                                     || w_data.last_proposed_h != final_h
+                                    || w_data.layout_retry_count > 0
                                 {
                                     window.propose_dimensions(final_w, final_h);
                                     w_data.last_proposed_w = final_w;
@@ -551,7 +547,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     };
 
                                     node.set_position(geom.x + off_l, geom.y + off_t);
-                                    node.place_top();
+                                    if state.focused_window.as_ref() == Some(&window.id()) {
+                                        node.place_top();
+                                    }
                                 }
                             }
                         }
