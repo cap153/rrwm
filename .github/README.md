@@ -1,3 +1,5 @@
+[中文README](README_CN.md)
+
 # Dependencies
 
 * [river](https://codeberg.org/river/river) 0.4.0
