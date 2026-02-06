@@ -17,11 +17,8 @@ use crate::protocol::river_layer_shell::river_layer_shell_v1::RiverLayerShellV1;
 use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
 use crate::protocol::river_wm::river_seat_v1::Event as SeatEvent;
 use crate::protocol::river_wm::{
-    river_node_v1::RiverNodeV1,
-    river_output_v1::RiverOutputV1,
-    river_seat_v1::RiverSeatV1,
-    river_window_manager_v1::RiverWindowManagerV1,
-    river_window_v1::{Edges, RiverWindowV1},
+    river_node_v1::RiverNodeV1, river_output_v1::RiverOutputV1, river_seat_v1::RiverSeatV1,
+    river_window_manager_v1::RiverWindowManagerV1, river_window_v1::RiverWindowV1,
 };
 use crate::protocol::river_xkb::{
     river_xkb_binding_v1::{Event as BindingEvent, RiverXkbBindingV1},
@@ -80,6 +77,8 @@ pub struct WindowData {
     pub output: Option<String>,
     pub is_fullscreen: bool,
     pub layout_retry_count: u8,
+    pub last_proposed_w: i32,
+    pub last_proposed_h: i32,
 }
 
 pub struct ModeInfo {
@@ -225,6 +224,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     output: current_out,
                     is_fullscreen: false,
                     layout_retry_count: 0,
+                    last_proposed_w: 0,
+                    last_proposed_h: 0,
                 });
             }
             WmEvent::ManageStart => {
@@ -346,7 +347,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
 
                 // 4. 焦点确认：告诉 River 真正把键盘给谁
-                // 4. 焦点确认与重试纠正
                 if let Some(f_id) = &state.focused_window {
                     if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
                         if (w_data.tags & state.focused_tags) != 0 {
@@ -355,11 +355,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 // 这模拟了用户的“切换焦点”操作，能有效治愈 Electron/mpv 的尺寸冻结症
                                 if w_data.layout_retry_count > 0 {
                                     if w_data.layout_retry_count % 2 != 0 {
-                                        info!("奇数次：假装失去焦点");
+                                        // info!("奇数次：假装失去焦点");
                                         // 奇数次：假装失去焦点
                                         seat.clear_focus();
                                     } else {
-                                        info!("偶数次：重新获得焦点");
+                                        // info!("偶数次：重新获得焦点");
                                         // 偶数次：重新获得焦点
                                         seat.focus_window(&w_data.window);
                                     }
@@ -377,26 +377,82 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                 // 这里不再用 .next()，而是迭代所有的 outputs
                 for (out_id, out_data) in &state.outputs {
-                    // 使用 out_data.tags 而不是全局的 state.focused_tags
                     let tree_key = (out_id.clone(), out_data.tags);
 
                     if let Some(root) = state.layout_roots.get(&tree_key) {
                         let mut results = Vec::new();
-                        // 这里传入的 usable_area 已经是 actions.rs 算好的包含偏移的矩形
                         calculate_layout(root, out_data.usable_area, &mut results);
 
+                        // --- A. 获取基础配置 ---
+                        let win_cfg = state.config.window.as_ref();
+                        let border_cfg = win_cfg
+                            .and_then(|c| c.active.as_ref())
+                            .and_then(|a| a.border.as_ref());
+                        let config_width = border_cfg.map(|b| b.width).unwrap_or(0);
+                        let config_color =
+                            border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
+                        let (br, bg, bb, ba) = Self::parse_color(config_color);
+                        let is_smart = win_cfg.map(|c| c.smart_borders).unwrap_or(false);
+                        let window_count = results.len();
+
                         for (window, geom) in results {
-                            if let Some(_w_info) =
-                                state.windows.iter().find(|w| w.id == window.id())
+                            // 我们需要用 iter_mut，因为要更新 last_proposed 字段
+                            if let Some(w_data) =
+                                state.windows.iter_mut().find(|w| w.id == window.id())
                             {
-                                state.last_geometry.insert(window.id(), geom);
-                                window.propose_dimensions(geom.w, geom.h);
-                                window.set_tiled(Edges::all());
+                                let is_focused =
+                                    state.focused_window.as_ref() == Some(&window.id());
+                                let current_win_width = if is_focused {
+                                    if is_smart && window_count <= 1 {
+                                        0
+                                    } else {
+                                        config_width
+                                    }
+                                } else {
+                                    0
+                                };
+
+                                // 计算收缩后的内容尺寸
+                                let shrunk_w = (geom.w - (current_win_width as i32 * 2)).max(1);
+                                let shrunk_h = (geom.h - (current_win_width as i32 * 2)).max(1);
+
+                                // --- 存入收缩后的几何信息，用于 Dimensions 比对 ---
+                                state.last_geometry.insert(
+                                    window.id(),
+                                    crate::wm::layout::Geometry {
+                                        x: geom.x,
+                                        y: geom.y,
+                                        w: shrunk_w,
+                                        h: shrunk_h,
+                                    },
+                                );
+
+                                // 设置边框
+                                window.set_borders(
+                                    crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                    current_win_width as i32,
+                                    br,
+                                    bg,
+                                    bb,
+                                    ba,
+                                );
+
+                                // --- 只有尺寸变了才发送建议，防止应用被 Resize 淹没 ---
+                                if w_data.last_proposed_w != shrunk_w
+                                    || w_data.last_proposed_h != shrunk_h
+                                {
+                                    window.propose_dimensions(shrunk_w, shrunk_h);
+                                    w_data.last_proposed_w = shrunk_w;
+                                    w_data.last_proposed_h = shrunk_h;
+                                }
+
+                                window.set_tiled(
+                                    crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                );
                             }
                         }
                     }
                 }
-
                 // 6. 后续清理：Waybar 激活与快捷键使能
                 if let Some(focused_name) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(focused_name) {
@@ -412,11 +468,20 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
+                // 这里也要拿到配置
+                let win_cfg = state.config.window.as_ref();
+                let border_cfg = win_cfg
+                    .and_then(|c| c.active.as_ref())
+                    .and_then(|a| a.border.as_ref());
+                let config_width = border_cfg.map(|b| b.width).unwrap_or(0);
+                let is_smart = win_cfg.map(|c| c.smart_borders).unwrap_or(false);
+
                 for (out_name, out_data) in &state.outputs {
                     let tree_key = (out_name.clone(), out_data.tags);
                     if let Some(root) = state.layout_roots.get(&tree_key) {
                         let mut results = Vec::new();
                         calculate_layout(root, out_data.usable_area, &mut results);
+                        let window_count = results.len();
 
                         for (window, geom) in results {
                             if let Some(w_data) =
@@ -426,7 +491,24 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     w_data.node = Some(window.get_node(qh, ()));
                                 }
                                 if let Some(node) = &w_data.node {
-                                    node.set_position(geom.x, geom.y);
+                                    // --- 核心：重新计算当前窗口的偏移量 ---
+                                    let is_focused =
+                                        state.focused_window.as_ref() == Some(&window.id());
+                                    let current_win_width = if is_focused {
+                                        if is_smart && window_count <= 1 {
+                                            0
+                                        } else {
+                                            config_width
+                                        }
+                                    } else {
+                                        0
+                                    };
+
+                                    // 物理位置 x, y 也要加上偏移，才能在格子里居中
+                                    node.set_position(
+                                        geom.x + current_win_width as i32,
+                                        geom.y + current_win_width as i32,
+                                    );
                                     node.place_top();
                                 }
                             }
@@ -765,9 +847,9 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                 // --- 修改点 1: 增加重试次数到 50 ---
                                 if w.layout_retry_count < 50 {
                                     info!(
-                            "-> Window {:?} size mismatch (Got {}x{}, Expected {}x{}), forcing relayout (Retry {}/50)...",
-                            proxy.id(), width, height, geo.w, geo.h, w.layout_retry_count + 1
-                        );
+                                        "-> Window {:?} size mismatch (Got {}x{}, Expected {}x{}), forcing relayout (Retry {}/50)...",
+                                        proxy.id(), width, height, geo.w, geo.h, w.layout_retry_count + 1
+                                    );
                                     w.layout_retry_count += 1;
 
                                     if let Some(wm) = &state.river_wm {

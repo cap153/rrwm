@@ -43,6 +43,27 @@ pub struct KeyboardConfig {
     pub numlock: Option<String>,
 }
 
+// 定义边框具体参数
+#[derive(Deserialize, Debug, Clone)]
+pub struct BorderParams {
+    pub width: u32,
+    pub color: String,
+}
+
+// 定义 active 分组
+#[derive(Deserialize, Debug, Clone)]
+pub struct ActiveConfig {
+    pub border: Option<BorderParams>,
+}
+
+// 定义 window 分组
+#[derive(Deserialize, Debug, Clone)]
+pub struct WindowConfig {
+    #[serde(rename = "smart-borders", default)] // 自动处理横杠
+    pub smart_borders: bool,
+    pub active: Option<ActiveConfig>,
+}
+
 // 2. 对应 [input] 部分
 #[derive(Deserialize, Debug, Clone)]
 pub struct InputConfig {
@@ -76,6 +97,7 @@ pub struct Config {
     pub keybindings: Option<HashMap<String, KeyBindingEntry>>,
     pub waybar: Option<WaybarConfig>,
     pub output: Option<HashMap<String, OutputConfig>>,
+    pub window: Option<WindowConfig>,
 }
 
 impl Config {
@@ -99,11 +121,17 @@ impl Config {
                     return config;
                 }
                 Err(e) => {
-                    error!("-> Configuration file parsing failed: {}, Default settings will be used", e);
+                    error!(
+                        "-> Configuration file parsing failed: {}, Default settings will be used",
+                        e
+                    );
                 }
             }
         } else {
-            warn!("-> Configuration file not found {:?}，Default settings will be used", path);
+            warn!(
+                "-> Configuration file not found {:?}，Default settings will be used",
+                path
+            );
         }
 
         // 修复点 2：补全 keybindings 字段初始化
@@ -112,6 +140,7 @@ impl Config {
             keybindings: None,
             waybar: None,
             output: None,
+            window: None,
         }
     }
 }

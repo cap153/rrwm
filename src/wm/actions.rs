@@ -556,7 +556,41 @@ impl AppState {
             Transform::Normal
         }
     }
+    /// 辅助函数：将 "#RRGGBB" 或 "#RRGGBBAA" 转换为 River 需要的 (r, g, b, a)
+    /// River 使用预乘 Alpha (Pre-multiplied Alpha)
+    // [src/wm/actions.rs]
 
+    pub fn parse_color(hex: &str) -> (u32, u32, u32, u32) {
+        let hex = hex.trim_start_matches('#');
+        let (r, g, b, a) = if hex.len() == 6 {
+            let r = u32::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u32::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u32::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            (r, g, b, 255)
+        } else if hex.len() == 8 {
+            let r = u32::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u32::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u32::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            let a = u32::from_str_radix(&hex[6..8], 16).unwrap_or(255);
+            (r, g, b, a)
+        } else {
+            (0, 0, 0, 255)
+        };
+
+        // --- 将 0-255 缩放到 0-0xFFFFFFFF ---
+        // River 期待的是完整的 32 位颜色分量
+        let r32 = r * 0x01010101;
+        let g32 = g * 0x01010101;
+        let b32 = b * 0x01010101;
+        let a32 = a * 0x01010101;
+
+        // 执行预乘
+        let pr = ((r32 as u64 * a32 as u64) / 0xffffffff) as u32;
+        let pg = ((g32 as u64 * a32 as u64) / 0xffffffff) as u32;
+        let pb = ((b32 as u64 * a32 as u64) / 0xffffffff) as u32;
+
+        (pr, pg, pb, a32)
+    }
     pub fn perform_action(&mut self, action: Action) {
         match action {
             Action::ToggleFullscreen => {
