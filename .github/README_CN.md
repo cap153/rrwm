@@ -1,3 +1,5 @@
+![preview](preview.png) 
+
 # 环境依赖
 
 * [river](https://codeberg.org/river/river) 0.4.0

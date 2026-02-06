@@ -73,7 +73,7 @@ j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | 
 
 # 如果想使用加号连接多重修饰符，需要加引号
 [keybindings."super+shift"]
-space = { action = "spawn", args = ["neovide"] }
+space = { action = "spawn", args = ["neovide", "--frame", "none"] }
 
 # 没有修饰符的按键
 [keybindings]

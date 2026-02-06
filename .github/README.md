@@ -1,3 +1,5 @@
+![preview](preview.png) 
+
 [中文README](README_CN.md)
 
 # Dependencies
