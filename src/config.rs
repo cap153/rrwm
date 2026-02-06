@@ -17,7 +17,7 @@ pub struct PositionConfig {
 // 2. 每个显示器的具体配置
 #[derive(Deserialize, Debug, Clone)]
 pub struct OutputConfig {
-    #[serde(rename = "focus-at-startup")]
+    #[serde(alias = "focus-at-startup")]
     pub focus_at_startup: Option<String>,
     pub mode: Option<String>,
     pub scale: Option<String>,
@@ -59,7 +59,7 @@ pub struct ActiveConfig {
 // 定义 window 分组
 #[derive(Deserialize, Debug, Clone)]
 pub struct WindowConfig {
-    #[serde(rename = "smart-borders", default)] // 自动处理横杠
+    #[serde(alias = "smart-borders", default)]
     pub smart_borders: bool,
     pub active: Option<ActiveConfig>,
 }

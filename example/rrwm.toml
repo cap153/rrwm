@@ -104,7 +104,7 @@ n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
 [output.HDMI-A-1]
-focus-at-startup = "true" # 默认聚焦在这个显示器，确保只有一个显示器配置了这个选项，否则启动时的焦点可能是随机的
+focus_at_startup = "true" # 默认聚焦在这个显示器，确保只有一个显示器配置了这个选项，否则启动时的焦点可能是随机的
 mode = "3840x2160@60.000" # 格式为"<width>x<height>" 或者 "<width>x<height>@<refresh rate>"，如果省略了刷新率，默认选择最高的刷新率。
 scale = "2" # 整数或分数调整缩放，例如"1.25"。
 transform = "normal" # 旋转显示，有效值为:normal, 90, 180, 270, flipped, flipped-90, flipped-180 and flipped-270.
@@ -116,3 +116,9 @@ mode = "1920x1080@60.000"
 scale = "1"
 transform = "90"
 position={ x="0", y="0" }
+
+[window]
+smart_borders = true      # 只有一个窗口时边框消失
+[window.active]
+border = { width = 2, color = "#bd93f9" }
+
