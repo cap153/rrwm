@@ -79,6 +79,7 @@ pub struct WindowData {
     pub app_id: Option<String>,
     pub output: Option<String>,
     pub is_fullscreen: bool,
+    pub layout_retry_count: u8,
 }
 
 pub struct ModeInfo {
@@ -223,6 +224,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     app_id: None,
                     output: current_out,
                     is_fullscreen: false,
+                    layout_retry_count: 0,
                 });
             }
             WmEvent::ManageStart => {
@@ -344,11 +346,27 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
 
                 // 4. 焦点确认：告诉 River 真正把键盘给谁
+                // 4. 焦点确认与重试纠正
                 if let Some(f_id) = &state.focused_window {
                     if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
                         if (w_data.tags & state.focused_tags) != 0 {
                             if let Some(seat) = &state.main_seat {
-                                seat.focus_window(&w_data.window);
+                                // 如果处于重试状态，我们玩个把戏：奇数次清除焦点，偶数次给焦点
+                                // 这模拟了用户的“切换焦点”操作，能有效治愈 Electron/mpv 的尺寸冻结症
+                                if w_data.layout_retry_count > 0 {
+                                    if w_data.layout_retry_count % 2 != 0 {
+                                        info!("奇数次：假装失去焦点");
+                                        // 奇数次：假装失去焦点
+                                        seat.clear_focus();
+                                    } else {
+                                        info!("偶数次：重新获得焦点");
+                                        // 偶数次：重新获得焦点
+                                        seat.focus_window(&w_data.window);
+                                    }
+                                } else {
+                                    // 正常情况：直接给焦点
+                                    seat.focus_window(&w_data.window);
+                                }
                             }
                         }
                     }
@@ -699,6 +717,9 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     if let Some(seat) = &state.main_seat {
                         seat.focus_window(proxy);
                     }
+                    if let Some(wm) = &state.river_wm {
+                        wm.manage_dirty();
+                    }
                 }
             }
             // --- 处理全屏请求 ---
@@ -726,6 +747,44 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     w.is_fullscreen = false;
                     if let Some(wm) = &state.river_wm {
                         wm.manage_dirty();
+                    }
+                }
+            }
+            // --- Dimensions 处理逻辑 ---
+            WinEvent::Dimensions { width, height } => {
+                if let Some(w_idx) = state.windows.iter().position(|w| w.id == proxy.id()) {
+                    let w = &mut state.windows[w_idx];
+
+                    if !w.is_fullscreen {
+                        if let Some(geo) = state.last_geometry.get(&proxy.id()) {
+                            let dw = (width as i32 - geo.w).abs();
+                            let dh = (height as i32 - geo.h).abs();
+
+                            // 误差检测
+                            if dw > 2 || dh > 2 {
+                                // --- 修改点 1: 增加重试次数到 50 ---
+                                if w.layout_retry_count < 50 {
+                                    info!(
+                            "-> Window {:?} size mismatch (Got {}x{}, Expected {}x{}), forcing relayout (Retry {}/50)...",
+                            proxy.id(), width, height, geo.w, geo.h, w.layout_retry_count + 1
+                        );
+                                    w.layout_retry_count += 1;
+
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
+                                } else {
+                                    // 只有到了 50 次（大约持续半秒到一秒的疯狂抗拒）才放弃
+                                    if w.layout_retry_count == 50 {
+                                        warn!("-> Window {:?} refuses to accept layout geometry, giving up enforcement.", proxy.id());
+                                        w.layout_retry_count += 1;
+                                    }
+                                }
+                            } else {
+                                // 尺寸符合预期，重置计数器
+                                w.layout_retry_count = 0;
+                            }
+                        }
                     }
                 }
             }

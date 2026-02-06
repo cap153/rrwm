@@ -17,6 +17,7 @@ empty_style = "<span color='#313244'>"
 [keybindings.alt]
 # 关闭聚焦窗口
 q = { action = "close_focused" }
+# 切换全屏
 f = { action = "toggle_fullscreen" }
 # 不同标签之间焦点切换
 1 = { action = "focus", args = ["1"] }
@@ -37,7 +38,7 @@ e = { action = "focus", args = ["down"] }
 # 启动软件
 Return = { action = "spawn", args = ["kitty"] }
 x = { action="spawn", args=["zen"] }
-j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | /usr/bin/satty --filename -' }
+j = { action="shell", cmd='/usr/bin/grim -t ppm - | /usr/bin/satty --filename - --fullscreen' }
 a = { action="spawn", args=["/usr/bin/fuzzel", "toggle"] }
 
 # 允许不同的修饰符
@@ -68,6 +69,7 @@ n = { action = "move", args = ["left"] }
 i = { action = "move", args = ["right"] }
 u = { action = "move", args = ["up"] }
 e = { action = "move", args = ["down"] }
+j = { action="shell", cmd='/usr/bin/grim -g "$(/usr/bin/slurp < /dev/null)" - | /usr/bin/satty --filename -' }
 
 # 如果想使用加号连接多重修饰符，需要加引号
 [keybindings."super+shift"]
