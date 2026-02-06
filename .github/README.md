@@ -118,6 +118,13 @@ mode = "1920x1080@60.000"
 scale = "1"
 transform = "90"
 position={ x="0", y="0" }
+
+[window]
+smart_borders = "true" # 只有一个窗口时边框/间隙消失
+gaps = "2" # 窗口间隙
+
+[window.active] # 聚焦窗口设置边框
+border = { width = "2", color = "#bd93f9" }
 ```
 
 # Waybar 示例配置

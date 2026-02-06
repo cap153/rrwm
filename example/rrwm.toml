@@ -120,6 +120,7 @@ position={ x="0", y="0" }
 [window]
 smart_borders = "true" # 只有一个窗口时边框/间隙消失
 gaps = "2" # 窗口间隙
+
 [window.active]
 border = { width = "2", color = "#bd93f9" }
 
