@@ -46,7 +46,7 @@ pub struct KeyboardConfig {
 // 定义边框具体参数
 #[derive(Deserialize, Debug, Clone)]
 pub struct BorderParams {
-    pub width: u32,
+    pub width: String,
     pub color: String,
 }
 
@@ -60,7 +60,7 @@ pub struct ActiveConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct WindowConfig {
     #[serde(alias = "smart-borders", default)]
-    pub smart_borders: bool,
+    pub smart_borders: String,
     pub active: Option<ActiveConfig>,
 }
 

@@ -388,11 +388,15 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         let border_cfg = win_cfg
                             .and_then(|c| c.active.as_ref())
                             .and_then(|a| a.border.as_ref());
-                        let config_width = border_cfg.map(|b| b.width).unwrap_or(0);
+                        let config_width = border_cfg
+                            .and_then(|b| b.width.parse::<u32>().ok()) // "2" -> 2
+                            .unwrap_or(0);
                         let config_color =
                             border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
                         let (br, bg, bb, ba) = Self::parse_color(config_color);
-                        let is_smart = win_cfg.map(|c| c.smart_borders).unwrap_or(false);
+                        let is_smart = win_cfg
+                            .map(|c| c.smart_borders.to_lowercase() == "true") // "true" -> true
+                            .unwrap_or(false);
                         let window_count = results.len();
 
                         for (window, geom) in results {
@@ -470,11 +474,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
             WmEvent::RenderStart => {
                 // 这里也要拿到配置
                 let win_cfg = state.config.window.as_ref();
-                let border_cfg = win_cfg
+                let config_width = win_cfg
                     .and_then(|c| c.active.as_ref())
-                    .and_then(|a| a.border.as_ref());
-                let config_width = border_cfg.map(|b| b.width).unwrap_or(0);
-                let is_smart = win_cfg.map(|c| c.smart_borders).unwrap_or(false);
+                    .and_then(|a| a.border.as_ref())
+                    .and_then(|b| b.width.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let is_smart = win_cfg
+                    .map(|c| c.smart_borders.to_lowercase() == "true")
+                    .unwrap_or(false);
 
                 for (out_name, out_data) in &state.outputs {
                     let tree_key = (out_name.clone(), out_data.tags);
