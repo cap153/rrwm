@@ -26,6 +26,8 @@ sudo cp example/rrwm.desktop /usr/local/share/wayland-sessions/
 
 # 示例配置
 
+我的配置在这里：[https://github.com/cap153/config/tree/main/river/.config/river](https://github.com/cap153/config/tree/main/river/.config/river) 
+
 ```toml
 # ~/.config/river/rrwm.toml
 
