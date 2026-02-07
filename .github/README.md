@@ -26,6 +26,25 @@ sudo cp target/release/rrwm /usr/local/bin
 sudo cp example/rrwm.desktop /usr/local/share/wayland-sessions/
 ```
 
+# Usage
+
+## Window Manager
+
+```bash
+river -c rrwm
+```
+
+## Client
+
+```bash
+rrwm [OPTIONS]
+
+Options:
+  --waybar    Run in Waybar client mode (receive JSON status stream)
+  --appid     List all active windows and their AppIDs
+  --help      Print this help message
+```
+
 # Configuration Example
 
 My configuration is here: [https://github.com/cap153/config/tree/main/river/.config/river](https://github.com/cap153/config/tree/main/river/.config/river) 

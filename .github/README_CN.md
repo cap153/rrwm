@@ -24,6 +24,25 @@ sudo cp target/release/rrwm /usr/local/bin
 sudo cp example/rrwm.desktop /usr/local/share/wayland-sessions/
 ```
 
+# 用法
+
+## 窗口管理器
+
+```bash
+river -c rrwm
+```
+
+## 客户端
+
+```bash
+rrwm [选项]
+
+选项:
+  --waybar    以 Waybar 客户端模式运行（接收 JSON 状态流）
+  --appid     列出所有活动窗口及其 AppID
+  --help      打印此帮助消息
+```
+
 # 示例配置
 
 我的配置在这里：[https://github.com/cap153/config/tree/main/river/.config/river](https://github.com/cap153/config/tree/main/river/.config/river) 

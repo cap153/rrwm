@@ -40,7 +40,7 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
-use log::{error, info, warn, debug};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
@@ -125,6 +125,7 @@ pub struct AppState {
     pub layer_shell_manager: Option<RiverLayerShellV1>,
     pub device_names: HashMap<ObjectId, String>,
     pub ipc_listener: Option<UnixListener>,
+    pub cmd_listener: Option<UnixListener>,
     pub ipc_clients: Vec<UnixStream>,
     pub output_manager: Option<ZwlrOutputManagerV1>,
     pub heads: Vec<HeadInfo>,
@@ -230,7 +231,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
             }
             WmEvent::ManageStart => {
                 // 1. 基础工作：处理 IPC 和广播状态
-                state.handle_ipc_connections();
+                state.handle_ipc_connections(); // 处理 Waybar 连接
                 state.broadcast_status();
 
                 // --- 新增：物理焦点生效逻辑 ---

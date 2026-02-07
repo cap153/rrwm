@@ -4,6 +4,7 @@ use crate::wm::AppState;
 use crate::wm::OutputData;
 use log::{error, info, warn};
 use serde::Serialize;
+use std::io::{Read, Write};
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
 use wayland_client::{Proxy, QueueHandle};
@@ -779,6 +780,56 @@ impl AppState {
         serde_json::to_string(&response).unwrap_or_default()
     }
 
+    /// 核心：处理指令 Socket 连接 (如 rrwm --appid)
+    pub fn handle_command_connections(&mut self) {
+        if let Some(ref listener) = self.cmd_listener {
+            // accept() 是非阻塞的
+            while let Ok((mut stream, _)) = listener.accept() {
+                // 1. 读取指令
+                let mut buf = [0; 1024];
+                // 尝试读取，如果客户端连接了但没发数据，这里可能会 WouldBlock。
+                // 但对于本地 CLI 工具，通常数据是随连接瞬间到达的。
+                // 为了鲁棒性，我们简单尝试读取，读不到就忽略。
+                if let Ok(n) = stream.read(&mut buf) {
+                    let command = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+
+                    // 2. 路由指令
+                    let response = match command.as_str() {
+                        "ls_clients" => self.get_app_ids_report(),
+                        _ => "Unknown command\n".to_string(),
+                    };
+
+                    // 3. 写回响应并关闭连接
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
+        }
+    }
+
+    /// 辅助：生成 AppID 报告字符串
+    fn get_app_ids_report(&self) -> String {
+        let mut report = String::from("ID\tAppID\t\tTitle/Tag\n");
+        report.push_str("--\t-----\t\t---------\n");
+
+        for w in &self.windows {
+            let app_id = w.app_id.as_deref().unwrap_or("<Unknown>");
+            let id_raw = w.id.protocol_id(); // 获取 Wayland 对象 ID
+                                             // 这里我们还可以加上 tags 或者是否全屏等信息，方便调试
+            let extra = if w.is_fullscreen { "[Fullscreen]" } else { "" };
+
+            report.push_str(&format!(
+                "{}\t{}\t\tTag:{:b} {}\n",
+                id_raw, app_id, w.tags, extra
+            ));
+        }
+
+        if self.windows.is_empty() {
+            report.push_str("(No windows)\n");
+        }
+
+        report
+    }
+
     /// 核心：处理 IPC 连接
     pub fn handle_ipc_connections(&mut self) {
         if let Some(ref listener) = self.ipc_listener {
@@ -786,7 +837,7 @@ impl AppState {
                 //info!("-> IPC: Discover new listeners (Bar/Script)");
                 let mut json = self.get_waybar_response_json();
                 json.push('\n');
-                let _ = std::io::Write::write_all(&mut stream, json.as_bytes());
+                let _ = Write::write_all(&mut stream, json.as_bytes());
 
                 self.ipc_clients.push(stream);
             }
