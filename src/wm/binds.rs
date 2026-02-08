@@ -1,7 +1,7 @@
 use crate::protocol::river_wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocol::river_xkb::river_xkb_bindings_v1::RiverXkbBindingsV1;
 use crate::wm::{actions::Action, AppState, KeyBinding};
-use log::{error, info, warn};
+use tracing::{error, info, warn};
 use wayland_client::QueueHandle;
 use xkbcommon::xkb;
 

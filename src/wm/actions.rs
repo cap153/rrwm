@@ -2,7 +2,7 @@ use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV
 use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
 use crate::wm::OutputData;
-use log::{error, info, warn};
+use tracing::{error, info, warn};
 use serde::Serialize;
 use std::io::{Read, Write};
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型

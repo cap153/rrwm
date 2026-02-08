@@ -1,7 +1,7 @@
 use crate::protocol::river_wm::river_seat_v1::Modifiers;
 use crate::wm::actions::Action;
 use crate::wm::layout::Direction;
-use log::{error, info, warn};
+use tracing::{error, info, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;

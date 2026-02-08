@@ -40,7 +40,7 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;

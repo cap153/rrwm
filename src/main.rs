@@ -1,5 +1,5 @@
-use log::{error, info};
 use std::io::{Read, Write};
+use tracing::{error, info};
 pub mod config;
 pub mod protocol;
 pub mod wm;
@@ -13,7 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use wayland_client::Connection;
 
 fn main() {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
     let args: Vec<String> = std::env::args().collect();
 
     // --- 使用 match 处理参数 ---
