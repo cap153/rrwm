@@ -348,7 +348,7 @@ impl AppState {
             let name = head.name.clone();
             let cfg = self.config.output.as_ref().and_then(|m| m.get(&name));
 
-            // 【修改 1】初始化 OutputData 时补全 full_area 字段
+            // 初始化 OutputData 时补全 full_area 字段
             self.outputs.entry(name.clone()).or_insert_with(|| {
                 info!("[Initialization] New monitor record found: {}", name);
                 OutputData {
@@ -439,14 +439,36 @@ impl AppState {
                 }
 
                 if let Some(out_data) = self.outputs.get_mut(&res.name) {
-                    let geometry = Geometry {
+
+                    // 只有当旧的 full_area 有效时才计算，防止新插入的显示器出现计算错误
+                    let (pad_x, pad_y, pad_w, pad_h) =
+                        if out_data.full_area.w > 0 && out_data.full_area.h > 0 {
+                            (
+                                out_data.usable_area.x - out_data.full_area.x, // 左边距
+                                out_data.usable_area.y - out_data.full_area.y, // 上边距
+                                out_data.full_area.w - out_data.usable_area.w, // 总宽度差 (左右边距之和)
+                                out_data.full_area.h - out_data.usable_area.h, // 总高度差 (上下边距之和)
+                            )
+                        } else {
+                            (0, 0, 0, 0)
+                        };
+
+                    // 更新全屏尺寸
+                    let new_full = Geometry {
                         x: res.x,
                         y: res.y,
                         w: res.w,
                         h: res.h,
                     };
-                    out_data.usable_area = geometry;
-                    out_data.full_area = geometry;
+                    out_data.full_area = new_full;
+
+                    // 将旧的边距应用到新的尺寸上，计算新的 usable_area
+                    out_data.usable_area = Geometry {
+                        x: new_full.x + pad_x,
+                        y: new_full.y + pad_y,
+                        w: new_full.w - pad_w,
+                        h: new_full.h - pad_h,
+                    };
                 }
             }
         }
