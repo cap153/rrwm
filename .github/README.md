@@ -1,4 +1,4 @@
-![preview](preview.png) 
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/c49823dd-4579-4ed1-8c11-5559b6898bfd" />
 
 [中文README](README_CN.md)
 
