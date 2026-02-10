@@ -150,6 +150,13 @@ gaps = "2" # 窗口间隙
 
 [window.active] # 聚焦窗口设置边框
 border = { width = "2", color = "#bd93f9" }
+
+[window.rule] # 给软件配置的图标可以在tag动态展示
+match = [
+	{ appid="kitty", icon="" },
+	{ appid="neovide", icon="" },
+	{ appid="wechat", icon="" },
+]
 ```
 
 # Waybar 示例配置

@@ -2,9 +2,9 @@ use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV
 use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
 use crate::wm::AppState;
 use crate::wm::OutputData;
-use tracing::{error, info, warn};
 use serde::Serialize;
 use std::io::{Read, Write};
+use tracing::{error, info, warn};
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
 use wayland_client::{Proxy, QueueHandle};
@@ -720,10 +720,51 @@ impl AppState {
         }
     }
 
+    // --- 根据 Tag 查找动态图标 ---
+    fn get_dynamic_icon(&self, tag_index: u32) -> Option<String> {
+        let mask = 1 << tag_index;
+        // 以前端展示为主，基于当前聚焦的显示器来判断
+        let out_name = self.focused_output.as_ref()?;
+        // 优先找焦点历史记录（用户最后操作过的那个窗口）
+        let win_id = self
+            .tag_focus_history
+            .get(&(out_name.clone(), mask))
+            .cloned()
+            .or_else(|| {
+                // 如果没有历史（比如刚启动），找该 Tag 下任意一个窗口
+                self.windows
+                    .iter()
+                    .find(|w| w.output.as_ref() == Some(out_name) && (w.tags & mask) != 0)
+                    .map(|w| w.id.clone())
+            });
+
+        let id = win_id?;
+        let w = self.windows.iter().find(|w| w.id == id)?;
+        let app_id = w.app_id.as_deref()?;
+
+        // 安全获取配置链：config -> window -> rule -> matches
+        let rules = self
+            .config
+            .window
+            .as_ref()?
+            .rule
+            .as_ref()?
+            .matches
+            .as_ref()?;
+
+        for rule in rules {
+            // 忽略大小写
+            if app_id.to_lowercase().contains(&rule.appid.to_lowercase()) {
+                return Some(rule.icon.clone());
+            }
+        }
+
+        None
+    }
     /// 辅助：统一生成给 Waybar 的状态数据
     fn get_waybar_response_json(&self) -> String {
         let occupied = self.get_occupied_tags();
-        let waybar_cfg = self.config.waybar.as_ref(); // 获取 [waybar] 配置
+        let waybar_cfg = self.config.waybar.as_ref();
 
         let mut tag_strings = Vec::new();
 
@@ -744,15 +785,21 @@ impl AppState {
         for i in 0..=visual_bound {
             let mask = 1 << i;
 
-            // --- 获取图标 ---
-            let icon = waybar_cfg
-                .and_then(|c| c.tag_icons.as_ref())
-                .and_then(|icons| icons.get(i as usize))
-                .cloned()
-                .unwrap_or_else(|| (i + 1).to_string());
+            // --- 优先尝试获取动态图标 ---
+            let mut icon = self.get_dynamic_icon(i);
+
+            // 如果没有动态规则匹配，回退到 [waybar] tag_icons
+            if icon.is_none() {
+                icon = waybar_cfg
+                    .and_then(|c| c.tag_icons.as_ref())
+                    .and_then(|icons| icons.get(i as usize))
+                    .cloned();
+            }
+
+            // 最后的保底：阿拉伯数字
+            let final_icon = icon.unwrap_or_else(|| (i + 1).to_string());
 
             // --- 确定当前状态对应的样式前缀 ---
-            // 逻辑：如果配置了样式字符串，就包裹它；如果没有，就返回 None
             let style_prefix = if (self.focused_tags & mask) != 0 {
                 waybar_cfg.and_then(|c| c.focused_style.as_ref())
             } else if (occupied & mask) != 0 {
@@ -763,8 +810,8 @@ impl AppState {
 
             // --- 应用样式 ---
             let styled_icon = match style_prefix {
-                Some(prefix) => format!("{}{}</span>", prefix, icon),
-                None => icon,
+                Some(prefix) => format!("{}{}</span>", prefix, final_icon),
+                None => final_icon,
             };
 
             tag_strings.push(styled_icon);

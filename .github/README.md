@@ -155,6 +155,13 @@ gaps = "2" # Gap between windows
 
 [window.active] # Borders for focused window
 border = { width = "2", color = "#bd93f9" }
+
+[window.rule] # The icons configured for the software can be dynamically displayed in the tag
+match = [
+	{ appid="kitty", icon="" },
+	{ appid="neovide", icon="" },
+	{ appid="wechat", icon="" },
+]
 ```
 
 # Waybar Integration Example

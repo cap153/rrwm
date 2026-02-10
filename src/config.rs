@@ -1,11 +1,11 @@
 use crate::protocol::river_wm::river_seat_v1::Modifiers;
 use crate::wm::actions::Action;
 use crate::wm::layout::Direction;
-use tracing::{error, info, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tracing::{error, info, warn};
 
 // 1. 定义显示器位置
 #[derive(Deserialize, Debug, Clone)]
@@ -56,6 +56,21 @@ pub struct ActiveConfig {
     pub border: Option<BorderParams>,
 }
 
+// --- 定义单条匹配规则 ---
+#[derive(Deserialize, Debug, Clone)]
+pub struct WindowRuleMatch {
+    pub appid: String,
+    pub icon: String,
+}
+
+// --- 定义 rule 分组 ---
+#[derive(Deserialize, Debug, Clone)]
+pub struct WindowRuleConfig {
+    // 因为 match 是关键字，所以字段名用 matches
+    #[serde(rename = "match")]
+    pub matches: Option<Vec<WindowRuleMatch>>,
+}
+
 // 定义 window 分组
 #[derive(Deserialize, Debug, Clone)]
 pub struct WindowConfig {
@@ -63,6 +78,7 @@ pub struct WindowConfig {
     pub smart_borders: String,
     pub gaps: Option<String>,
     pub active: Option<ActiveConfig>,
+    pub rule: Option<WindowRuleConfig>,
 }
 
 // 2. 对应 [input] 部分
