@@ -67,6 +67,8 @@ empty_style = "<span color='#313244'>" # Style for empty tags
 
 # Use `wev` to find XKB names for specific keys
 [keybindings.alt]
+# Switch focus between floating and tiled windows
+space = { action = "switch_focus_between_floating_and_tiling" }
 # Close focused window
 q = { action = "close_focused" }
 # Toggle full screen
@@ -93,6 +95,8 @@ Return = { action = "spawn", args = ["ghostty"] }
 
 # Example of multiple modifiers: Alt + Shift
 [keybindings.alt_shift]
+# The currently focused window switches to the suspended / tiled state
+space = { action = "toggle_window_floating" }
 # Reload configuration 
 # (Hot-plugging monitors might cause waybar overlap; restarting waybar helps)
 c = [

@@ -40,11 +40,11 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
-use tracing::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use tracing::{debug, error, info, warn};
 use wayland_backend::client::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -79,6 +79,8 @@ pub struct WindowData {
     pub layout_retry_count: u8,
     pub last_proposed_w: i32,
     pub last_proposed_h: i32,
+    pub is_floating: bool,
+    pub float_geo: Geometry,
 }
 
 pub struct ModeInfo {
@@ -137,6 +139,7 @@ pub struct AppState {
     pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
     pub wl_name_to_monitor_name: HashMap<u32, String>,
     pub active_river_outputs: Vec<RiverOutputInfo>,
+    pub floating_cascade_index: u8,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -227,6 +230,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     layout_retry_count: 0,
                     last_proposed_w: 0,
                     last_proposed_h: 0,
+                    is_floating: false,
+                    float_geo: Geometry {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    },
                 });
             }
             WmEvent::ManageStart => {
@@ -483,6 +493,63 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                     }
                 }
+
+                // --- 悬浮窗口处理 (Floating Windows) ---
+                let win_cfg = state.config.window.as_ref();
+                let border_cfg = win_cfg
+                    .and_then(|c| c.active.as_ref())
+                    .and_then(|a| a.border.as_ref());
+                let border_val = border_cfg
+                    .and_then(|b| b.width.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let border_color_str = border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
+                let (br, bg, bb, ba) = Self::parse_color(border_color_str);
+
+                for w_data in state.windows.iter_mut() {
+                    if w_data.is_floating && !w_data.is_fullscreen {
+                        // 1. 设置尺寸
+                        // 悬浮窗口的尺寸存储在 float_geo 中 (由 Actions 初始化或 Dimensions 更新)
+                        let target_w = w_data.float_geo.w;
+                        let target_h = w_data.float_geo.h;
+
+                        // 避免重复发送 (Last Proposed Check)
+                        if w_data.last_proposed_w != target_w || w_data.last_proposed_h != target_h
+                        {
+                            w_data.window.propose_dimensions(target_w, target_h);
+                            w_data.last_proposed_w = target_w;
+                            w_data.last_proposed_h = target_h;
+                        }
+
+                        // 2. 设置边框, 沿用聚焦/非聚焦的颜色逻辑
+                        let is_focused = state.focused_window.as_ref() == Some(&w_data.id);
+
+                        // 悬浮窗口不受 Gaps/SmartBorders 影响，始终显示配置的边框宽度
+                        if is_focused {
+                            w_data.window.set_borders(
+                                crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                border_val as i32,
+                                br,
+                                bg,
+                                bb,
+                                ba,
+                            );
+                        } else {
+                            w_data.window.set_borders(
+                                crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                border_val as i32,
+                                49,
+                                50,
+                                68,
+                                255, // 默认深色
+                            );
+                        }
+
+                        // 3. 标记状态, 告诉窗口它不再是平铺状态 (Edges::none()), 这样客户端可能会绘制阴影或圆角
+                        w_data
+                            .window
+                            .set_tiled(crate::protocol::river_wm::river_window_v1::Edges::empty());
+                    }
+                }
                 // 6. 后续清理：Waybar 激活与快捷键使能
                 if let Some(focused_name) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(focused_name) {
@@ -514,7 +581,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let is_smart = win_cfg
                     .map(|c| c.smart_borders.to_lowercase() == "true")
                     .unwrap_or(false);
-
+                // 1. 渲染平铺层 (Tiling Layer)
                 for (out_name, out_data) in &state.outputs {
                     let tree_key = (out_name.clone(), out_data.tags);
                     if let Some(root) = state.layout_roots.get(&tree_key) {
@@ -556,6 +623,31 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                     }
                 }
+                // 2. 渲染悬浮层 (Floating Layer)
+                for w_data in &mut state.windows {
+                    if w_data.is_floating && !w_data.is_fullscreen {
+                        if w_data.node.is_none() {
+                            w_data.node = Some(w_data.window.get_node(qh, ()));
+                        }
+                        if let Some(node) = &w_data.node {
+                            // 设置位置 (从 float_geo 读取)
+                            node.set_position(w_data.float_geo.x, w_data.float_geo.y);
+
+                            // 【关键】悬浮窗口必须盖在平铺窗口上面
+                            node.place_top();
+                        }
+                    }
+                }
+
+                // 3. 焦点层 (Focus Layer) 只要是当前焦点，就必须在最最上面
+                if let Some(f_id) = &state.focused_window {
+                    if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
+                        if let Some(node) = &w_data.node {
+                            node.place_top();
+                        }
+                    }
+                }
+
                 proxy.render_finish();
             }
 
@@ -826,8 +918,21 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             SplitType::Vertical
                         };
 
-                        root.insert_at(&target_id, w_data, split);
-                        state.layout_roots.insert(tree_key, root);
+                        // 检查 insert_at 的返回值。如果返回 false（说明目标不在树里，可能是悬浮了），则强制将新窗口与根节点合并。
+                        if !root.insert_at(&target_id, w_data.clone(), split) {
+                            info!("-> [Layout] Target {:?} not found in tree (maybe floating), merging with root.", target_id);
+                            // 构造新的根节点：将旧树和新窗口组合, 默认左右分割
+                            let new_root = LayoutNode::Container {
+                                split_type: SplitType::Vertical,
+                                ratio: 0.5,
+                                left_child: Box::new(root), // 旧树
+                                right_child: Box::new(LayoutNode::Window(w_data)), // 新窗口
+                            };
+                            state.layout_roots.insert(tree_key, new_root);
+                        } else {
+                            // 插入成功，直接放回
+                            state.layout_roots.insert(tree_key, root);
+                        }
                     }
 
                     // 4. 更新全局状态
@@ -878,6 +983,19 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 if let Some(w_idx) = state.windows.iter().position(|w| w.id == proxy.id()) {
                     let w = &mut state.windows[w_idx];
 
+                    // --- 全屏窗口：由 Compositor 接管，忽略 ---
+                    if w.is_fullscreen {
+                        return;
+                    }
+
+                    // --- 悬浮窗口: 如果应用报告了新尺寸（比如视频分辨率变了，或者未来实现了拖拽调整）更新内存中的记录 ---
+                    if w.is_floating {
+                        w.float_geo.w = width as i32;
+                        w.float_geo.h = height as i32;
+                        return;
+                    }
+
+                    // 既不是全屏也不是悬浮窗口，强制平铺
                     if !w.is_fullscreen {
                         if let Some(geo) = state.last_geometry.get(&proxy.id()) {
                             let dw = (width as i32 - geo.w).abs();

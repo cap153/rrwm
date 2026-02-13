@@ -36,6 +36,8 @@ enum MoveHint {
 pub enum Action {
     CloseFocused,
     ToggleFullscreen,
+    ToggleFloat,      // 当前聚焦的窗口切换悬浮状态
+    SwitchFocusFloat, // 在悬浮和平铺窗口之间切换焦点
     Focus(Direction),
     FocusTag(u32),           // 切换到某个标签掩码
     MoveToTag(u32),          // 将窗口移动到某个标签掩码
@@ -55,6 +57,12 @@ impl Action {
             "close_window" | "close_focused" => Action::CloseFocused,
             // --- 内部指令：全屏切换 ---
             "fullscreen" | "toggle_fullscreen" => Action::ToggleFullscreen,
+            // --- 内部指令：悬浮窗切换 ---
+            "toggle_window_floating" | "toggle_float" => Action::ToggleFloat,
+            // --- 内部指令：悬浮窗/平铺焦点切换 ---
+            "switch_focus_between_floating_and_tiling" | "switch_float_tiling" => {
+                Action::SwitchFocusFloat
+            }
             // --- 内部指令：重载配置 ---
             "reload_configuration" => Action::ReloadConfiguration,
             // --- 内部指令：焦点切换 ---
@@ -439,7 +447,6 @@ impl AppState {
                 }
 
                 if let Some(out_data) = self.outputs.get_mut(&res.name) {
-
                     // 只有当旧的 full_area 有效时才计算，防止新插入的显示器出现计算错误
                     let (pad_x, pad_y, pad_w, pad_h) =
                         if out_data.full_area.w > 0 && out_data.full_area.h > 0 {
@@ -616,6 +623,174 @@ impl AppState {
     }
     pub fn perform_action(&mut self, action: Action) {
         match action {
+            // --- 切换悬浮状态 ---
+            Action::ToggleFloat => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    // 1. 获取必要信息：窗口数据、所在显示器、Tag
+                    let (mut win_idx, mut out_name_opt, mut win_tags) = (None, None, 0);
+                    if let Some(idx) = self.windows.iter().position(|w| w.id == f_id) {
+                        win_idx = Some(idx);
+                        out_name_opt = self.windows[idx].output.clone();
+                        win_tags = self.windows[idx].tags;
+                    }
+
+                    if let (Some(idx), Some(out_name)) = (win_idx, out_name_opt) {
+                        let is_now_floating = !self.windows[idx].is_floating;
+                        self.windows[idx].is_floating = is_now_floating;
+
+                        let tree_key = (out_name.clone(), win_tags);
+
+                        if is_now_floating {
+                            // --- Case A: 平铺 -> 悬浮 ---
+                            info!("-> [Action] Window {:?} Switch to floating mode", f_id);
+
+                            // 1. 从平铺树中移除 (保持不变)
+                            if let Some(root) = self.layout_roots.remove(&tree_key) {
+                                if let Some(new_root) = LayoutNode::remove_at(root, &f_id) {
+                                    self.layout_roots.insert(tree_key.clone(), new_root);
+                                }
+                            }
+
+                            // 2. 计算悬浮几何信息 (Geometry)
+                            if let Some(out_data) = self.outputs.get(&out_name) {
+                                let screen = out_data.usable_area;
+                                let w = (screen.w as f32 * 0.6) as i32;
+                                let h = (screen.h as f32 * 0.6) as i32;
+
+                                // 基准中心点 (Slot 0 的位置)
+                                let base_x = screen.x + (screen.w - w) / 2;
+                                let base_y = screen.y + (screen.h - h) / 2;
+                                let step = 25;
+
+                                // --- 智能空位查找算法 ---
+                                let mut final_slot = 0;
+
+                                // 我们尝试从 0 到 10 个位置
+                                for slot in 0..10 {
+                                    let test_x = base_x + (slot * step);
+                                    let test_y = base_y + (slot * step);
+
+                                    // 检查是否有任何现存的悬浮窗口占用了这个位置
+                                    // 排除掉自己 (f_id)
+                                    let collision = self.windows.iter().any(|other| {
+                                        other.id != f_id
+                                            && other.is_floating
+                                            && other.output.as_ref() == Some(&out_name)
+                                            && (other.float_geo.x - test_x).abs() < 5
+                                            && (other.float_geo.y - test_y).abs() < 5
+                                    });
+
+                                    if !collision {
+                                        final_slot = slot;
+                                        break; // 找到空位，停止查找
+                                    }
+                                }
+
+                                let offset = final_slot * step;
+
+                                // 存入 float_geo
+                                self.windows[idx].float_geo = Geometry {
+                                    x: base_x + offset,
+                                    y: base_y + offset,
+                                    w,
+                                    h,
+                                };
+                            }
+                        } else {
+                            // --- Case B: 悬浮 -> 平铺 ---
+                            info!("-> [Action] Window {:?} Switch to Tiling mode", f_id);
+
+                            // 如果树为空，作为根；否则插入到当前焦点历史或随机位置
+                            let w_data = self.windows[idx].clone();
+
+                            if !self.layout_roots.contains_key(&tree_key) {
+                                self.layout_roots
+                                    .insert(tree_key, LayoutNode::Window(w_data));
+                            } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
+                                // 尝试插入到某个“参考窗口”旁边（比如最后活跃的平铺窗口
+                                let target_id = self
+                                    .tag_focus_history
+                                    .get(&tree_key)
+                                    .cloned()
+                                    .unwrap_or(f_id.clone());
+
+                                // 如果 insert_at 返回 false（没找到 target），我们就把 root 和新窗口组成一个新的 Container
+                                if !root.insert_at(&target_id, w_data.clone(), SplitType::Vertical)
+                                {
+                                    // 没找到插入点，强行合并
+                                    let new_root = LayoutNode::Container {
+                                        split_type: SplitType::Vertical,
+                                        ratio: 0.5,
+                                        left_child: Box::new(root),
+                                        right_child: Box::new(LayoutNode::Window(w_data)),
+                                    };
+                                    self.layout_roots.insert(tree_key, new_root);
+                                } else {
+                                    self.layout_roots.insert(tree_key, root);
+                                }
+                            }
+                        }
+
+                        // 强制刷新
+                        if let Some(wm) = &self.river_wm {
+                            wm.manage_dirty();
+                        }
+                    }
+                }
+            }
+
+            // --- 在悬浮和平铺层之间切换焦点 ---
+            Action::SwitchFocusFloat => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    let mut current_is_floating = false;
+                    let mut current_out = None;
+
+                    if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                        current_is_floating = w.is_floating;
+                        current_out = w.output.clone();
+                    }
+
+                    if let Some(out_name) = current_out {
+                        // 目标：在同屏幕、同 Tag 下，找 is_floating 状态相反的窗口
+                        // 优先找：TagFocusHistory 里记录的（最近活跃的）
+                        // 其次找：列表里第一个符合条件的
+
+                        let target_is_floating = !current_is_floating;
+                        let mask = self.focused_tags;
+
+                        let candidate = self
+                            .windows
+                            .iter()
+                            .filter(|w| {
+                                w.output.as_ref() == Some(&out_name) && (w.tags & mask) != 0
+                            })
+                            .filter(|w| w.is_floating == target_is_floating)
+                            .map(|w| w.id.clone())
+                            .next(); // 简单起见，取第一个。进阶可以结合历史记录。
+
+                        if let Some(target_id) = candidate {
+                            info!(
+                                "-> [Focus] Cross-layer switching: {:?} -> {:?}",
+                                f_id, target_id
+                            );
+                            self.focused_window = Some(target_id.clone());
+
+                            // 别忘了告诉 Seat
+                            if let Some(seat) = &self.main_seat {
+                                if let Some(w_data) =
+                                    self.windows.iter().find(|w| w.id == target_id)
+                                {
+                                    seat.focus_window(&w_data.window);
+                                }
+                            }
+
+                            if let Some(wm) = &self.river_wm {
+                                wm.manage_dirty();
+                            }
+                        }
+                    }
+                }
+            }
             Action::ToggleFullscreen => {
                 if let Some(f_id) = self.focused_window.clone() {
                     if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {

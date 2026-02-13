@@ -65,6 +65,8 @@ empty_style = "<span color='#313244'>" # 空标签样式
 
 # 可以使用wev来查询特定的按键对应的XKB名称
 [keybindings.alt]
+# 在悬浮和平铺窗口之间切换焦点
+space = { action = "switch_focus_between_floating_and_tiling" }
 # 关闭聚焦窗口
 q = { action = "close_focused" }
 # 切换全屏
@@ -90,6 +92,8 @@ Return = { action = "spawn", args = ["ghostty"] }
 
 # 多重修饰符示例：Alt + Shift
 [keybindings.alt_shift]
+# 当前聚焦的窗口切换悬浮/平铺状态
+space = { action = "toggle_window_floating" }
 # 重载配置(插拔显示器可能会导致waybar重叠，可以尝试重启waybar)
 c = [
 	{ action = "reload_configuration" },
