@@ -324,6 +324,114 @@ impl AppState {
             }
         }
     }
+    /// 悬浮窗口的定向焦点查找（线性排序 + 本地循环）
+    fn focus_floating_in_direction(&mut self, dir: Direction) {
+        let f_id = match self.focused_window.clone() {
+            Some(id) => id,
+            None => return,
+        };
+
+        // 1. 获取当前窗口元数据
+        let (current_out, current_tags) = {
+            if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                (w.output.clone(), w.tags)
+            } else {
+                return;
+            }
+        };
+        let current_out = match current_out {
+            Some(o) => o,
+            None => return,
+        };
+
+        // 2. 收集当前 Tag 的所有悬浮窗口
+        let mut candidates: Vec<&crate::wm::WindowData> = self
+            .windows
+            .iter()
+            .filter(|w| {
+                w.is_floating
+                    && !w.is_fullscreen
+                    && w.output.as_ref() == Some(&current_out)
+                    && (w.tags & current_tags) != 0
+            })
+            .collect();
+
+        // --- 逻辑 A: 悬浮窗数量 == 1 (孤儿模式) ---
+        if candidates.len() <= 1 {
+            match dir {
+                Direction::Left => self.cycle_tag(-1, dir),
+                Direction::Right => self.cycle_tag(1, dir),
+                _ => { /* 上下不动 */ }
+            }
+            return;
+        }
+
+        // --- 逻辑 B: 悬浮窗数量 > 1 (本地线性循环模式) ---
+
+        // 3. 根据方向进行线性排序 (处理重叠)
+        match dir {
+            Direction::Left | Direction::Right => {
+                candidates.sort_by(|a, b| {
+                    a.float_geo
+                        .x
+                        .cmp(&b.float_geo.x)
+                        .then_with(|| a.float_geo.y.cmp(&b.float_geo.y))
+                        .then_with(|| a.id.protocol_id().cmp(&b.id.protocol_id()))
+                });
+            }
+            Direction::Up | Direction::Down => {
+                candidates.sort_by(|a, b| {
+                    a.float_geo
+                        .y
+                        .cmp(&b.float_geo.y)
+                        .then_with(|| a.float_geo.x.cmp(&b.float_geo.x))
+                        .then_with(|| a.id.protocol_id().cmp(&b.id.protocol_id()))
+                });
+            }
+        }
+
+        // 4. 找到当前索引
+        let cur_idx = match candidates.iter().position(|w| w.id == f_id) {
+            Some(i) => i,
+            None => return,
+        };
+
+        // 5. 计算目标索引 (实现循环)
+        let len = candidates.len();
+        let target_idx = match dir {
+            Direction::Left | Direction::Up => {
+                if cur_idx == 0 {
+                    len - 1
+                } else {
+                    cur_idx - 1
+                }
+            }
+            Direction::Right | Direction::Down => {
+                if cur_idx == len - 1 {
+                    0
+                } else {
+                    cur_idx + 1
+                }
+            }
+        };
+
+        // 6. 执行切换
+        let target = candidates[target_idx];
+        info!("-> [Focus Float] Linear wrap switch to {:?}", target.id);
+
+        self.focused_window = Some(target.id.clone());
+        if let Some(seat) = &self.main_seat {
+            seat.focus_window(&target.window);
+        }
+
+        // 更新该 Tag 的焦点历史记录
+        self.tag_focus_history
+            .insert((current_out, current_tags), target.id.clone());
+
+        if let Some(wm) = &self.river_wm {
+            wm.manage_dirty();
+        }
+    }
     pub fn apply_output_configs(&mut self, qh: &QueueHandle<Self>, serial: u32) {
         let mgr = match &self.output_manager {
             Some(m) => m,
@@ -588,8 +696,6 @@ impl AppState {
     }
     /// 辅助函数：将 "#RRGGBB" 或 "#RRGGBBAA" 转换为 River 需要的 (r, g, b, a)
     /// River 使用预乘 Alpha (Pre-multiplied Alpha)
-    // [src/wm/actions.rs]
-
     pub fn parse_color(hex: &str) -> (u32, u32, u32, u32) {
         let hex = hex.trim_start_matches('#');
         let (r, g, b, a) = if hex.len() == 6 {
@@ -676,6 +782,7 @@ impl AppState {
                                         other.id != f_id
                                             && other.is_floating
                                             && other.output.as_ref() == Some(&out_name)
+                                            && (other.tags & win_tags) != 0 // 只有同一 Tag 下的窗口才算作“障碍物”
                                             && (other.float_geo.x - test_x).abs() < 5
                                             && (other.float_geo.y - test_y).abs() < 5
                                     });
@@ -882,28 +989,47 @@ impl AppState {
                     .ok();
             }
             Action::Focus(dir) => {
-                let mut moved_locally = false;
+                let mut is_floating_focus = false;
                 if let Some(f_id) = &self.focused_window {
-                    if let Some(new_focus) = self.find_neighbor(f_id, dir) {
-                        self.focused_window = Some(new_focus.clone());
-                        if let Some(out_id) = self
-                            .windows
-                            .iter()
-                            .find(|w| w.id == new_focus)
-                            .and_then(|w| w.output.clone())
-                        {
-                            self.tag_focus_history
-                                .insert((out_id, self.focused_tags), new_focus);
+                    if let Some(w) = self.windows.iter().find(|w| w.id == *f_id) {
+                        if w.is_floating && !w.is_fullscreen {
+                            is_floating_focus = true;
                         }
-                        moved_locally = true;
                     }
                 }
-                if !moved_locally {
-                    match dir {
-                        // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
-                        Direction::Right => self.cycle_tag(1, dir),
-                        Direction::Left => self.cycle_tag(-1, dir),
-                        _ => {}
+
+                if is_floating_focus {
+                    // --- 悬浮模式焦点逻辑 ---
+                    self.focus_floating_in_direction(dir);
+                } else {
+                    // --- 平铺模式焦点逻辑 ---
+                    self.restrict_focus_to_tiling = true;
+                    // --- 记录方向，供 ManageStart 使用 ---
+                    self.pending_focus_dir = Some(dir);
+
+                    let mut moved_locally = false;
+                    if let Some(f_id) = &self.focused_window {
+                        if let Some(new_focus) = self.find_neighbor(f_id, dir) {
+                            self.focused_window = Some(new_focus.clone());
+                            if let Some(out_id) = self
+                                .windows
+                                .iter()
+                                .find(|w| w.id == new_focus)
+                                .and_then(|w| w.output.clone())
+                            {
+                                self.tag_focus_history
+                                    .insert((out_id, self.focused_tags), new_focus);
+                            }
+                            moved_locally = true;
+                        }
+                    }
+                    if !moved_locally {
+                        match dir {
+                            // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
+                            Direction::Right => self.cycle_tag(1, dir),
+                            Direction::Left => self.cycle_tag(-1, dir),
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -1415,7 +1541,7 @@ impl AppState {
         } else {
             32 - occupied.leading_zeros() - 1
         };
-        let bound_idx = (max_occupied_idx + 1).min(8);
+        let bound_idx = (max_occupied_idx + 1).min(31);
 
         let next_idx = if delta > 0 {
             if current_idx >= bound_idx {

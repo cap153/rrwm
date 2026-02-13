@@ -40,6 +40,7 @@ use crate::protocol::wlr_output_management::{
     zwlr_output_manager_v1::{Event as MgrEvent, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{Event as ModeEvent, ZwlrOutputModeV1},
 };
+use crate::wm::layout::Direction;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
@@ -140,6 +141,8 @@ pub struct AppState {
     pub wl_name_to_monitor_name: HashMap<u32, String>,
     pub active_river_outputs: Vec<RiverOutputInfo>,
     pub floating_cascade_index: u8,
+    pub restrict_focus_to_tiling: bool,
+    pub pending_focus_dir: Option<Direction>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -244,7 +247,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 state.handle_ipc_connections(); // 处理 Waybar 连接
                 state.broadcast_status();
 
-                // --- 新增：物理焦点生效逻辑 ---
+                // --- 物理焦点生效逻辑 ---
                 if let Some((x, y)) = state.pending_pointer_warp.take() {
                     if let Some(seat) = &state.main_seat {
                         info!("-> [Physics Focus] Executing mouse teleport within management sequence: {},{}", x, y);
@@ -275,27 +278,76 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 };
 
                 if needs_restore {
-                    // 优先看当前活跃显示器下有没有历史焦点
-                    let history_id = state
-                        .focused_output
-                        .as_ref()
-                        .and_then(|out_id| {
-                            state
-                                .tag_focus_history
-                                .get(&(out_id.clone(), state.focused_tags))
-                        })
-                        .cloned();
-                    if let Some(hid) = history_id {
-                        state.focused_window = Some(hid);
-                    } else {
-                        // 实在不行，抓取当前活跃标签页下的任意一个可见窗口
-                        state.focused_window = state
+                    let mut candidate = None;
+
+                    // A. 尝试从历史记录恢复 (保持平铺优先)
+                    if let Some(out_id) = &state.focused_output {
+                        if let Some(hid) = state
+                            .tag_focus_history
+                            .get(&(out_id.clone(), state.focused_tags))
+                        {
+                            if let Some(w) = state.windows.iter().find(|w| w.id == *hid) {
+                                if !state.restrict_focus_to_tiling || !w.is_floating {
+                                    candidate = Some(hid.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // B. 如果历史记录不可用
+                    if candidate.is_none() {
+                        // 1. 优先找平铺窗口 (任意一个)
+                        candidate = state
                             .windows
                             .iter()
-                            .find(|w| (w.tags & state.focused_tags) != 0)
+                            .find(|w| {
+                                (w.tags & state.focused_tags) != 0
+                                    && !w.is_floating
+                                    && w.output.as_deref() == state.focused_output.as_deref()
+                            })
                             .map(|w| w.id.clone());
+
+                        // 2. 如果没找到平铺，且处于平铺限制模式 (说明这是跨 Tag 切过来的)
+                        //    尝试根据方向找悬浮窗口
+                        if candidate.is_none() && state.restrict_focus_to_tiling {
+                            if let Some(dir) = state.pending_focus_dir {
+                                // 筛选当前 Tag 的所有悬浮窗
+                                let floats: Vec<&WindowData> = state
+                                    .windows
+                                    .iter()
+                                    .filter(|w| {
+                                        (w.tags & state.focused_tags) != 0
+                                            && w.is_floating
+                                            && w.output.as_deref()
+                                                == state.focused_output.as_deref()
+                                    })
+                                    .collect();
+
+                                if !floats.is_empty() {
+                                    let target = match dir {
+                                        // 从左边切过来 -> 聚焦最右边
+                                        crate::wm::layout::Direction::Left => {
+                                            floats.iter().max_by_key(|w| w.float_geo.x)
+                                        }
+                                        // 从右边切过来 -> 聚焦最左边
+                                        crate::wm::layout::Direction::Right => {
+                                            floats.iter().min_by_key(|w| w.float_geo.x)
+                                        }
+                                        // 上下切过来 -> 随便聚焦一个 (通常不会触发)
+                                        _ => floats.first(),
+                                    };
+                                    candidate = target.map(|w| w.id.clone());
+                                }
+                            }
+                        }
                     }
+
+                    state.focused_window = candidate;
                 }
+
+                // 重置标记
+                state.restrict_focus_to_tiling = false;
+                state.pending_focus_dir = None;
                 // --- 遍历所有窗口，根据 is_fullscreen 标志，强制同步 Wayland 状态 ---
                 for w in state.windows.iter_mut() {
                     if w.is_fullscreen {

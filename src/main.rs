@@ -108,6 +108,8 @@ fn main() {
         wl_name_to_monitor_name: HashMap::new(),
         active_river_outputs: Vec::new(),
         floating_cascade_index: 0,
+        restrict_focus_to_tiling: false,
+        pending_focus_dir: None,
     };
 
     let _registry = display.get_registry(&qh, ());

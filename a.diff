@@ -1,0 +1,367 @@
+diff --git a/src/main.rs b/src/main.rs
+index ad06964..7dfaaca 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -108,6 +108,7 @@ fn main() {
+         wl_name_to_monitor_name: HashMap::new(),
+         active_river_outputs: Vec::new(),
+         floating_cascade_index: 0,
++        restrict_focus_to_tiling: false,
+     };
+ 
+     let _registry = display.get_registry(&qh, ());
+diff --git a/src/wm/actions.rs b/src/wm/actions.rs
+index 222f6ec..a8b216a 100644
+--- a/src/wm/actions.rs
++++ b/src/wm/actions.rs
+@@ -324,6 +324,195 @@ impl AppState {
+             }
+         }
+     }
++    /// 悬浮窗口的定向焦点查找（含跨 Tag 逻辑 和 垂直循环逻辑）
++    fn focus_floating_in_direction(&mut self, dir: Direction) {
++        let f_id = match self.focused_window.clone() {
++            Some(id) => id,
++            None => return,
++        };
++
++        // 1. 获取当前窗口信息
++        let (current_geo, current_out, current_tags) = {
++            if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
++                (w.float_geo, w.output.clone(), w.tags)
++            } else {
++                return;
++            }
++        };
++        let current_out = match current_out {
++            Some(o) => o,
++            None => return,
++        };
++
++        let cur_cx = current_geo.x + current_geo.w / 2;
++        let cur_cy = current_geo.y + current_geo.h / 2;
++
++        // --- A. 本地查找 (Local Search) ---
++        // 尝试寻找方向上最近的邻居（不循环）
++        let best_local = self
++            .windows
++            .iter()
++            .filter(|w| {
++                w.id != f_id
++                    && w.is_floating
++                    && w.output.as_ref() == Some(&current_out)
++                    && (w.tags & current_tags) != 0
++                    && !w.is_fullscreen
++            })
++            .filter(|w| {
++                let cx = w.float_geo.x + w.float_geo.w / 2;
++                let cy = w.float_geo.y + w.float_geo.h / 2;
++                match dir {
++                    Direction::Left => cx < cur_cx,
++                    Direction::Right => cx > cur_cx,
++                    Direction::Up => cy < cur_cy,
++                    Direction::Down => cy > cur_cy,
++                }
++            })
++            .min_by(|a, b| {
++                // 距离计算 (欧几里得距离平方)
++                let acx = a.float_geo.x + a.float_geo.w / 2;
++                let acy = a.float_geo.y + a.float_geo.h / 2;
++                let bcx = b.float_geo.x + b.float_geo.w / 2;
++                let bcy = b.float_geo.y + b.float_geo.h / 2;
++
++                let dist_a = (acx - cur_cx).pow(2) + (acy - cur_cy).pow(2);
++                let dist_b = (bcx - cur_cx).pow(2) + (bcy - cur_cy).pow(2);
++
++                // 排序逻辑：优先距离，距离相等比较 ID (Protocol ID)
++                match dist_a.cmp(&dist_b) {
++                    std::cmp::Ordering::Equal => a.id.protocol_id().cmp(&b.id.protocol_id()),
++                    other => other,
++                }
++            });
++
++        if let Some(target) = best_local {
++            info!("-> [Focus Float] Local switch to {:?}", target.id);
++            self.focused_window = Some(target.id.clone());
++            if let Some(seat) = &self.main_seat {
++                seat.focus_window(&target.window);
++            }
++            return;
++        }
++
++        // --- B. 边界处理 (Fallback Strategy) ---
++        // 如果本地没找到邻居，根据方向决定策略
++        match dir {
++            Direction::Left | Direction::Right => {
++                // 水平方向：跨 Tag 搜索
++                let current_idx = current_tags.trailing_zeros();
++
++                for i in 1..32 {
++                    let next_idx = match dir {
++                        Direction::Right => (current_idx + i) % 32,
++                        Direction::Left => (current_idx + 32 - i) % 32,
++                        // 解决 E0004 错误：在外层限制了 Left|Right 的情况下，这里不可能走到 Up|Down
++                        _ => unreachable!(),
++                    };
++                    let next_mask = 1 << next_idx;
++
++                    let candidates: Vec<&crate::wm::WindowData> = self
++                        .windows
++                        .iter()
++                        .filter(|w| {
++                            w.is_floating
++                                && !w.is_fullscreen
++                                && w.output.as_ref() == Some(&current_out)
++                                && (w.tags & next_mask) != 0
++                        })
++                        .collect();
++
++                    if !candidates.is_empty() {
++                        let target = candidates.iter().max_by(|a, b| {
++                            let ax = a.float_geo.x;
++                            let bx = b.float_geo.x;
++                            match dir {
++                                Direction::Left => ax
++                                    .cmp(&bx)
++                                    .then_with(|| a.id.protocol_id().cmp(&b.id.protocol_id())),
++                                Direction::Right => bx
++                                    .cmp(&ax)
++                                    .then_with(|| b.id.protocol_id().cmp(&a.id.protocol_id())),
++                                _ => std::cmp::Ordering::Equal,
++                            }
++                        });
++
++                        if let Some(&final_win) = target {
++                            info!(
++                                "-> [Focus Float] Cross-Tag switch to Tag {} -> {:?}",
++                                next_idx + 1,
++                                final_win.id
++                            );
++
++                            if let Some(out_data) = self.outputs.get_mut(&current_out) {
++                                out_data.tags = next_mask;
++                                self.focused_tags = next_mask;
++                            }
++
++                            self.focused_window = Some(final_win.id.clone());
++                            if let Some(seat) = &self.main_seat {
++                                seat.focus_window(&final_win.window);
++                            }
++                            if let Some(wm) = &self.river_wm {
++                                wm.manage_dirty();
++                            }
++                            return;
++                        }
++                    }
++                }
++            }
++            Direction::Up | Direction::Down => {
++                // --- 垂直方向：同 Tag 首尾循环 (Vertical Wrap) ---
++                // 1. 筛选出当前 Tag 所有的悬浮窗口 (排除自己)
++                let candidates = self.windows.iter().filter(|w| {
++                    w.id != f_id
++                        && w.is_floating
++                        && !w.is_fullscreen
++                        && w.output.as_ref() == Some(&current_out)
++                        && (w.tags & current_tags) != 0
++                });
++
++                // 2. 根据方向寻找极值
++                let target = match dir {
++                    Direction::Up => {
++                        // 向上找不到了 -> 去找最下面的 (Y 最大)
++                        candidates.max_by(|a, b| {
++                            a.float_geo
++                                .y
++                                .cmp(&b.float_geo.y)
++                                // Y 相同比 X
++                                .then_with(|| a.float_geo.x.cmp(&b.float_geo.x))
++                                // 都相同比 ID
++                                .then_with(|| a.id.protocol_id().cmp(&b.id.protocol_id()))
++                        })
++                    }
++                    Direction::Down => {
++                        // 向下找不到了 -> 去找最上面的 (Y 最小)
++                        candidates.min_by(|a, b| {
++                            a.float_geo
++                                .y
++                                .cmp(&b.float_geo.y)
++                                .then_with(|| a.float_geo.x.cmp(&b.float_geo.x))
++                                .then_with(|| a.id.protocol_id().cmp(&b.id.protocol_id()))
++                        })
++                    }
++                    _ => unreachable!(),
++                };
++
++                // 3. 切换焦点
++                if let Some(final_win) = target {
++                    info!("-> [Focus Float] Vertical Wrap to {:?}", final_win.id);
++                    self.focused_window = Some(final_win.id.clone());
++                    if let Some(seat) = &self.main_seat {
++                        seat.focus_window(&final_win.window);
++                    }
++                    if let Some(wm) = &self.river_wm {
++                        wm.manage_dirty();
++                    }
++                }
++            }
++        }
++    }
+     pub fn apply_output_configs(&mut self, qh: &QueueHandle<Self>, serial: u32) {
+         let mgr = match &self.output_manager {
+             Some(m) => m,
+@@ -882,28 +1071,46 @@ impl AppState {
+                     .ok();
+             }
+             Action::Focus(dir) => {
+-                let mut moved_locally = false;
++                let mut is_floating_focus = false;
++
++                // 1. 检查当前焦点是否为悬浮窗口
+                 if let Some(f_id) = &self.focused_window {
+-                    if let Some(new_focus) = self.find_neighbor(f_id, dir) {
+-                        self.focused_window = Some(new_focus.clone());
+-                        if let Some(out_id) = self
+-                            .windows
+-                            .iter()
+-                            .find(|w| w.id == new_focus)
+-                            .and_then(|w| w.output.clone())
+-                        {
+-                            self.tag_focus_history
+-                                .insert((out_id, self.focused_tags), new_focus);
++                    if let Some(w) = self.windows.iter().find(|w| w.id == *f_id) {
++                        if w.is_floating && !w.is_fullscreen {
++                            is_floating_focus = true;
+                         }
+-                        moved_locally = true;
+                     }
+                 }
+-                if !moved_locally {
+-                    match dir {
+-                        // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
+-                        Direction::Right => self.cycle_tag(1, dir),
+-                        Direction::Left => self.cycle_tag(-1, dir),
+-                        _ => {}
++
++                if is_floating_focus {
++                    // --- 悬浮模式焦点逻辑 ---
++                    self.focus_floating_in_direction(dir);
++                } else {
++                    // --- 平铺模式焦点逻辑 ---
++                    self.restrict_focus_to_tiling = true;
++                    let mut moved_locally = false;
++                    if let Some(f_id) = &self.focused_window {
++                        if let Some(new_focus) = self.find_neighbor(f_id, dir) {
++                            self.focused_window = Some(new_focus.clone());
++                            if let Some(out_id) = self
++                                .windows
++                                .iter()
++                                .find(|w| w.id == new_focus)
++                                .and_then(|w| w.output.clone())
++                            {
++                                self.tag_focus_history
++                                    .insert((out_id, self.focused_tags), new_focus);
++                            }
++                            moved_locally = true;
++                        }
++                    }
++                    if !moved_locally {
++                        match dir {
++                            // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
++                            Direction::Right => self.cycle_tag(1, dir),
++                            Direction::Left => self.cycle_tag(-1, dir),
++                            _ => {}
++                        }
+                     }
+                 }
+             }
+@@ -1415,7 +1622,7 @@ impl AppState {
+         } else {
+             32 - occupied.leading_zeros() - 1
+         };
+-        let bound_idx = (max_occupied_idx + 1).min(8);
++        let bound_idx = (max_occupied_idx + 1).min(31);
+ 
+         let next_idx = if delta > 0 {
+             if current_idx >= bound_idx {
+diff --git a/src/wm/mod.rs b/src/wm/mod.rs
+index 47b56b7..d8d5fc5 100644
+--- a/src/wm/mod.rs
++++ b/src/wm/mod.rs
+@@ -140,6 +140,7 @@ pub struct AppState {
+     pub wl_name_to_monitor_name: HashMap<u32, String>,
+     pub active_river_outputs: Vec<RiverOutputInfo>,
+     pub floating_cascade_index: u8,
++    pub restrict_focus_to_tiling: bool,
+ }
+ 
+ // --- 1. 监听 WlRegistry (寻找全局接口) ---
+@@ -244,7 +245,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
+                 state.handle_ipc_connections(); // 处理 Waybar 连接
+                 state.broadcast_status();
+ 
+-                // --- 新增：物理焦点生效逻辑 ---
++                // --- 物理焦点生效逻辑 ---
+                 if let Some((x, y)) = state.pending_pointer_warp.take() {
+                     if let Some(seat) = &state.main_seat {
+                         info!("-> [Physics Focus] Executing mouse teleport within management sequence: {},{}", x, y);
+@@ -275,27 +276,43 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
+                 };
+ 
+                 if needs_restore {
+-                    // 优先看当前活跃显示器下有没有历史焦点
+-                    let history_id = state
+-                        .focused_output
+-                        .as_ref()
+-                        .and_then(|out_id| {
+-                            state
+-                                .tag_focus_history
+-                                .get(&(out_id.clone(), state.focused_tags))
+-                        })
+-                        .cloned();
+-                    if let Some(hid) = history_id {
+-                        state.focused_window = Some(hid);
+-                    } else {
+-                        // 实在不行，抓取当前活跃标签页下的任意一个可见窗口
+-                        state.focused_window = state
++                    let mut candidate = None;
++
++                    // A. 尝试从历史记录恢复
++                    if let Some(out_id) = &state.focused_output {
++                        if let Some(hid) = state
++                            .tag_focus_history
++                            .get(&(out_id.clone(), state.focused_tags))
++                        {
++                            // 检查历史窗口是否存在且符合条件
++                            if let Some(w) = state.windows.iter().find(|w| w.id == *hid) {
++                                // 【过滤逻辑】
++                                // 如果没有限制，或者是平铺窗口，才允许恢复
++                                if !state.restrict_focus_to_tiling || !w.is_floating {
++                                    candidate = Some(hid.clone());
++                                }
++                            }
++                        }
++                    }
++
++                    // B. 如果历史记录不可用（或被过滤了），尝试找任意一个符合条件的窗口
++                    if candidate.is_none() {
++                        candidate = state
+                             .windows
+                             .iter()
+-                            .find(|w| (w.tags & state.focused_tags) != 0)
++                            .find(|w| {
++                                (w.tags & state.focused_tags) != 0 &&
++                // 【过滤逻辑】如果是限制模式，只找非悬浮窗口
++                (!state.restrict_focus_to_tiling || !w.is_floating)
++                            })
+                             .map(|w| w.id.clone());
+                     }
++
++                    state.focused_window = candidate;
+                 }
++
++                // 用完即焚，重置标记，以免影响鼠标点击或其他操作
++                state.restrict_focus_to_tiling = false;
+                 // --- 遍历所有窗口，根据 is_fullscreen 标志，强制同步 Wayland 状态 ---
+                 for w in state.windows.iter_mut() {
+                     if w.is_fullscreen {
