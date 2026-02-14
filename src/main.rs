@@ -109,6 +109,7 @@ fn main() {
         active_river_outputs: Vec::new(),
         floating_cascade_index: 0,
         restrict_focus_to_tiling: false,
+        restrict_focus_to_floating: false,
         pending_focus_dir: None,
     };
 

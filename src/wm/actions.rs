@@ -324,14 +324,13 @@ impl AppState {
             }
         }
     }
-    /// 悬浮窗口的定向焦点查找（线性排序 + 本地循环）
+    /// 核心：悬浮窗口的定向焦点查找（线性排序 + 跨 Tag 穿透）
     fn focus_floating_in_direction(&mut self, dir: Direction) {
         let f_id = match self.focused_window.clone() {
             Some(id) => id,
             None => return,
         };
 
-        // 1. 获取当前窗口元数据
         let (current_out, current_tags) = {
             if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
                 (w.output.clone(), w.tags)
@@ -344,7 +343,7 @@ impl AppState {
             None => return,
         };
 
-        // 2. 收集当前 Tag 的所有悬浮窗口
+        // 1. 收集当前 Tag 的所有悬浮窗口
         let mut candidates: Vec<&crate::wm::WindowData> = self
             .windows
             .iter()
@@ -356,19 +355,7 @@ impl AppState {
             })
             .collect();
 
-        // --- 逻辑 A: 悬浮窗数量 == 1 (孤儿模式) ---
-        if candidates.len() <= 1 {
-            match dir {
-                Direction::Left => self.cycle_tag(-1, dir),
-                Direction::Right => self.cycle_tag(1, dir),
-                _ => { /* 上下不动 */ }
-            }
-            return;
-        }
-
-        // --- 逻辑 B: 悬浮窗数量 > 1 (本地线性循环模式) ---
-
-        // 3. 根据方向进行线性排序 (处理重叠)
+        // 2. 根据方向线性排序 (解决重叠)
         match dir {
             Direction::Left | Direction::Right => {
                 candidates.sort_by(|a, b| {
@@ -390,43 +377,66 @@ impl AppState {
             }
         }
 
-        // 4. 找到当前索引
         let cur_idx = match candidates.iter().position(|w| w.id == f_id) {
             Some(i) => i,
             None => return,
         };
 
-        // 5. 计算目标索引 (实现循环)
-        let len = candidates.len();
-        let target_idx = match dir {
-            Direction::Left | Direction::Up => {
-                if cur_idx == 0 {
-                    len - 1
+        // 3. 核心行为：判定是内部移动还是跨 Tag 穿透
+        match dir {
+            Direction::Left => {
+                if cur_idx > 0 {
+                    // 内部切换
+                    let target = candidates[cur_idx - 1];
+                    self.focused_window = Some(target.id.clone());
+                    if let Some(seat) = &self.main_seat {
+                        seat.focus_window(&target.window);
+                    }
                 } else {
-                    cur_idx - 1
+                    // 撞左墙 -> 跨 Tag 穿透
+                    self.restrict_focus_to_floating = true; // 标记：我要找悬浮窗
+                    self.pending_focus_dir = Some(dir);
+                    self.cycle_tag(-1, dir);
                 }
             }
-            Direction::Right | Direction::Down => {
-                if cur_idx == len - 1 {
-                    0
+            Direction::Right => {
+                if cur_idx < candidates.len() - 1 {
+                    let target = candidates[cur_idx + 1];
+                    self.focused_window = Some(target.id.clone());
+                    if let Some(seat) = &self.main_seat {
+                        seat.focus_window(&target.window);
+                    }
                 } else {
-                    cur_idx + 1
+                    // 撞右墙 -> 跨 Tag 穿透
+                    self.restrict_focus_to_floating = true;
+                    self.pending_focus_dir = Some(dir);
+                    self.cycle_tag(1, dir);
                 }
             }
-        };
-
-        // 6. 执行切换
-        let target = candidates[target_idx];
-        info!("-> [Focus Float] Linear wrap switch to {:?}", target.id);
-
-        self.focused_window = Some(target.id.clone());
-        if let Some(seat) = &self.main_seat {
-            seat.focus_window(&target.window);
+            Direction::Up => {
+                // 上下方向维持内部 Wrap 逻辑，不跨 Tag
+                let target = if cur_idx == 0 {
+                    candidates[candidates.len() - 1]
+                } else {
+                    candidates[cur_idx - 1]
+                };
+                self.focused_window = Some(target.id.clone());
+                if let Some(seat) = &self.main_seat {
+                    seat.focus_window(&target.window);
+                }
+            }
+            Direction::Down => {
+                let target = if cur_idx == candidates.len() - 1 {
+                    candidates[0]
+                } else {
+                    candidates[cur_idx + 1]
+                };
+                self.focused_window = Some(target.id.clone());
+                if let Some(seat) = &self.main_seat {
+                    seat.focus_window(&target.window);
+                }
+            }
         }
-
-        // 更新该 Tag 的焦点历史记录
-        self.tag_focus_history
-            .insert((current_out, current_tags), target.id.clone());
 
         if let Some(wm) = &self.river_wm {
             wm.manage_dirty();
@@ -1573,28 +1583,28 @@ impl AppState {
             }
 
             // --- 基于树的边缘焦点重定向 ---
-            let tree_key = (out_id.clone(), next_mask);
-            let edge_win = if let Some(root) = self.layout_roots.get(&tree_key) {
-                // 如果向右切(Direction::Right)，进入新页面要找【左】边缘
-                // 如果向左切(Direction::Left)，进入新页面要找【右】边缘
-                let look_dir = if dir == Direction::Right {
-                    Direction::Left
+            if !self.restrict_focus_to_tiling && !self.restrict_focus_to_floating {
+                let tree_key = (out_id.clone(), next_mask);
+                let edge_win = if let Some(root) = self.layout_roots.get(&tree_key) {
+                    let look_dir = if dir == Direction::Right {
+                        Direction::Left
+                    } else {
+                        Direction::Right
+                    };
+                    Some(Self::find_edge_in_tree(root, look_dir))
                 } else {
-                    Direction::Right
+                    None
                 };
-                Some(Self::find_edge_in_tree(root, look_dir))
-            } else {
-                None
-            };
 
-            if let Some(win_id) = edge_win {
-                info!(
-                    "-> [Focus] Enter a new tab and lock the physical edge window: {:?}",
-                    win_id
-                );
-                self.focused_window = Some(win_id.clone());
-                self.tag_focus_history.insert(tree_key, win_id);
+                if let Some(win_id) = edge_win {
+                    info!("-> [Focus] Auto-lock tiling edge: {:?}", win_id);
+                    self.focused_window = Some(win_id.clone());
+                    self.tag_focus_history.insert(tree_key, win_id);
+                } else {
+                    self.focused_window = None;
+                }
             } else {
+                // 如果有标记，清空当前焦点，交给 ManageStart 的“策略宇宙”去处理
                 self.focused_window = None;
             }
         }
