@@ -343,22 +343,62 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     } else {
                         // ======= 策略 B: 平铺优先 (用于：关闭平铺窗、平铺层穿透) =======
 
-                        // 1. 历史恢复 (仅限平铺)
-                        if let Some(out_id) = &state.focused_output {
-                            if let Some(hid) = state
-                                .tag_focus_history
-                                .get(&(out_id.clone(), state.focused_tags))
-                            {
-                                if let Some(_w) = state
-                                    .windows
-                                    .iter()
-                                    .find(|w| w.id == *hid && !w.is_floating)
-                                {
-                                    candidate = Some(hid.clone());
+                        // --- 【核心修复：优先响应方向意图 (Edge Search)】 ---
+                        // 如果有方向意图（说明是跨 Tag 切过来的），优先找该方向的边缘窗口，无视历史
+                        if candidate.is_none() {
+                            if let Some(dir) = state.pending_focus_dir {
+                                if let Some(out_id) = &state.focused_output {
+                                    let tree_key = (out_id.clone(), state.focused_tags);
+                                    // 从 BSP 树中查找物理边缘
+                                    if let Some(root) = state.layout_roots.get(&tree_key) {
+                                        let look_dir = match dir {
+                                            // 向左切入 -> 找最右边
+                                            crate::wm::layout::Direction::Left => {
+                                                Some(crate::wm::layout::Direction::Right)
+                                            }
+                                            // 向右切入 -> 找最左边
+                                            crate::wm::layout::Direction::Right => {
+                                                Some(crate::wm::layout::Direction::Left)
+                                            }
+                                            // 上下方向通常不做跨 Tag 边缘定位，保持 None 即可
+                                            _ => None,
+                                        };
+
+                                        if let Some(d) = look_dir {
+                                            let edge_id = Self::find_edge_in_tree(root, d);
+                                            // 校验一下这个 ID 是否还在 windows 列表中且是平铺
+                                            if let Some(_w) = state
+                                                .windows
+                                                .iter()
+                                                .find(|w| w.id == edge_id && !w.is_floating)
+                                            {
+                                                candidate = Some(edge_id);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        // 2. 找当前 Tag 的任意平铺窗
+
+                        // 1. 历史恢复 (仅限平铺) - 降级为第二优先级
+                        if candidate.is_none() {
+                            if let Some(out_id) = &state.focused_output {
+                                if let Some(hid) = state
+                                    .tag_focus_history
+                                    .get(&(out_id.clone(), state.focused_tags))
+                                {
+                                    if let Some(_w) = state
+                                        .windows
+                                        .iter()
+                                        .find(|w| w.id == *hid && !w.is_floating)
+                                    {
+                                        candidate = Some(hid.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. 找当前 Tag 的任意平铺窗 (保底)
                         if candidate.is_none() {
                             candidate = state
                                 .windows

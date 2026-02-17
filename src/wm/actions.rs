@@ -1013,9 +1013,6 @@ impl AppState {
                     self.focus_floating_in_direction(dir);
                 } else {
                     // --- 平铺模式焦点逻辑 ---
-                    self.restrict_focus_to_tiling = true;
-                    // --- 记录方向，供 ManageStart 使用 ---
-                    self.pending_focus_dir = Some(dir);
 
                     let mut moved_locally = false;
                     if let Some(f_id) = &self.focused_window {
@@ -1034,6 +1031,9 @@ impl AppState {
                         }
                     }
                     if !moved_locally {
+                        // 只有在本地没动（准备跨 Tag 或撞墙）时，才设置意图
+                        self.restrict_focus_to_tiling = true;
+                        self.pending_focus_dir = Some(dir);
                         match dir {
                             // 将 dir 传进去，让 cycle_tag 知道是从哪边“撞墙”的
                             Direction::Right => self.cycle_tag(1, dir),
@@ -1501,7 +1501,7 @@ impl AppState {
         mask
     }
     /// 递归查找 BSP 树的物理边缘窗口
-    fn find_edge_in_tree(node: &LayoutNode, dir: Direction) -> ObjectId {
+    pub fn find_edge_in_tree(node: &LayoutNode, dir: Direction) -> ObjectId {
         match node {
             LayoutNode::Window(w) => w.id.clone(),
             LayoutNode::Container {
