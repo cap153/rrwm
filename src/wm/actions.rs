@@ -152,8 +152,6 @@ impl AppState {
 
             let (next_id, next_data) = sorted[next_idx];
             let next_id = next_id.clone();
-
-            // 【核心修正】获取目标显示器当前正在查看的标签
             let next_monitor_tags = next_data.tags;
 
             info!(
@@ -161,30 +159,59 @@ impl AppState {
                 current_out, self.focused_tags, next_id, next_monitor_tags
             );
 
-            // 1. 确定“着陆边缘”
-            let landing_dir = match dir {
-                Direction::Up => Direction::Down,
-                Direction::Down => Direction::Up,
-                Direction::Left => Direction::Right,
-                Direction::Right => Direction::Left,
-            };
+            // --- 【全屏霸权判断】 ---
+            // 检查目标显示器是否有全屏窗口
+            let fullscreen_win = self
+                .windows
+                .iter()
+                .find(|w| {
+                    w.output.as_ref() == Some(&next_id)
+                        && (w.tags & next_monitor_tags) != 0
+                        && w.is_fullscreen
+                })
+                .map(|w| w.id.clone());
 
-            // 2. 【核心修正】使用目标显示器自己的标签构造 Key
-            let tree_key = (next_id.clone(), next_monitor_tags);
-
-            let edge_win = if let Some(root) = self.layout_roots.get(&tree_key) {
-                Some(Self::find_edge_in_tree(root, landing_dir))
+            // 确定目标窗口：全屏优先 -> 其次找平铺边缘 -> 否则为空
+            let target_win = if let Some(fs_id) = fullscreen_win {
+                Some(fs_id)
             } else {
-                None
+                // 原有的平铺边缘查找逻辑
+                let landing_dir = match dir {
+                    Direction::Up => Direction::Down,
+                    Direction::Down => Direction::Up,
+                    Direction::Left => Direction::Right,
+                    Direction::Right => Direction::Left,
+                };
+                let tree_key = (next_id.clone(), next_monitor_tags);
+                if let Some(root) = self.layout_roots.get(&tree_key) {
+                    Some(Self::find_edge_in_tree(root, landing_dir))
+                } else {
+                    None
+                }
             };
 
             // 3. 执行焦点和鼠标瞬移
-            if let Some(win_id) = edge_win {
-                info!("-> [Focus] Lock target screen edge window: {:?}", win_id);
+            if let Some(win_id) = target_win {
+                info!("-> [Focus] Lock target output window: {:?}", win_id);
                 self.focused_window = Some(win_id.clone());
-                self.tag_focus_history.insert(tree_key, win_id.clone());
+                // 更新该屏幕的历史记录，防止切走再切回来时状态丢失
+                self.tag_focus_history
+                    .insert((next_id.clone(), next_monitor_tags), win_id.clone());
 
-                if let Some(geom) = self.last_geometry.get(&win_id) {
+                // 鼠标瞬移逻辑
+                // 如果是全屏窗口，直接飞到屏幕中心，无需依赖 last_geometry
+                let is_fs = self
+                    .windows
+                    .iter()
+                    .find(|w| w.id == win_id)
+                    .map(|w| w.is_fullscreen)
+                    .unwrap_or(false);
+
+                if is_fs {
+                    let cx = next_data.usable_area.x + (next_data.usable_area.w / 2);
+                    let cy = next_data.usable_area.y + (next_data.usable_area.h / 2);
+                    self.pending_pointer_warp = Some((cx, cy));
+                } else if let Some(geom) = self.last_geometry.get(&win_id) {
                     let cx = geom.x + (geom.w / 2);
                     let cy = geom.y + (geom.h / 2);
                     self.pending_pointer_warp = Some((cx, cy));
@@ -197,9 +224,9 @@ impl AppState {
                 self.focused_window = None;
             }
 
-            // 4. 更新全局状态：切换当前活跃显示器，并同步影子标签
+            // 4. 更新全局状态
             self.focused_output = Some(next_id);
-            self.focused_tags = next_monitor_tags; // 👈 必须同步这个，否则 Waybar 会显示错误的 Tag
+            self.focused_tags = next_monitor_tags;
 
             if let Some(wm) = &self.river_wm {
                 wm.manage_dirty();
