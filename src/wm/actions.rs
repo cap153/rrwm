@@ -1000,15 +1000,35 @@ impl AppState {
             }
             Action::Focus(dir) => {
                 let mut is_floating_focus = false;
+                let mut is_fullscreen_focus = false;
                 if let Some(f_id) = &self.focused_window {
                     if let Some(w) = self.windows.iter().find(|w| w.id == *f_id) {
-                        if w.is_floating && !w.is_fullscreen {
+                        if w.is_fullscreen {
+                            is_fullscreen_focus = true;
+                        } else if w.is_floating {
                             is_floating_focus = true;
                         }
                     }
                 }
-
-                if is_floating_focus {
+                if is_fullscreen_focus {
+                    // --- 【新增：全屏模式焦点逻辑】 ---
+                    // 全屏窗口独占当前 Tag，左右移动直接跨 Tag，上下忽略
+                    match dir {
+                        Direction::Left => {
+                            // 同样需要标记意图，以便下个 Tag 能正确处理边缘查找（如果下个 Tag 没全屏窗的话）
+                            self.restrict_focus_to_tiling = true;
+                            self.pending_focus_dir = Some(dir);
+                            self.cycle_tag(-1, dir);
+                        }
+                        Direction::Right => {
+                            self.restrict_focus_to_tiling = true;
+                            self.pending_focus_dir = Some(dir);
+                            self.cycle_tag(1, dir);
+                        }
+                        _ => { /* 全屏状态下，Up/Down 通常不处理，或者留给应用自己处理 */
+                        }
+                    }
+                } else if is_floating_focus {
                     // --- 悬浮模式焦点逻辑 ---
                     self.focus_floating_in_direction(dir);
                 } else {

@@ -286,6 +286,19 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 if needs_restore {
                     let mut candidate = None;
 
+                    // 如果当前 Tag 有全屏窗口，无视任何 restrict 标记，无视历史，强制聚焦全屏窗口
+                    if let Some(out_id) = &state.focused_output {
+                        candidate = state
+                            .windows
+                            .iter()
+                            .find(|w| {
+                                w.output.as_ref() == Some(out_id)
+                                    && (w.tags & state.focused_tags) != 0
+                                    && w.is_fullscreen
+                            })
+                            .map(|w| w.id.clone());
+                    }
+
                     if state.restrict_focus_to_floating {
                         // ======= 策略 A: 悬浮优先 (用于：关闭悬浮窗、悬浮层穿透) =======
 
@@ -947,7 +960,6 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
         match event {
             // 当窗口被关闭（比如在终端里输了 exit）
-            // [src/wm/mod.rs] -> WinEvent::Closed
             WinEvent::Closed => {
                 let id = proxy.id();
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
