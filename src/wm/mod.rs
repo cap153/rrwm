@@ -51,10 +51,17 @@ use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use xkbcommon::xkb;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BindingMode {
+    Normal,
+    Resize,
+}
+
 /// 快捷键状态结构：将 River 绑定对象与本地 Action 关联
 pub struct KeyBinding {
     pub obj: RiverXkbBindingV1,
     pub actions: Vec<Action>,
+    pub mode: BindingMode,
 }
 
 #[derive(Debug, Clone)]
@@ -140,10 +147,10 @@ pub struct AppState {
     pub anonymous_ls_outputs: Vec<RiverLayerShellOutputV1>,
     pub wl_name_to_monitor_name: HashMap<u32, String>,
     pub active_river_outputs: Vec<RiverOutputInfo>,
-    pub floating_cascade_index: u8,
     pub restrict_focus_to_tiling: bool,
     pub restrict_focus_to_floating: bool,
     pub pending_focus_dir: Option<Direction>,
+    pub is_resize_mode: bool,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -569,9 +576,20 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             gaps_val = border_val;
                         }
 
-                        let border_color_str =
+                        // --- 根据模式决定边框颜色 ---
+                        let normal_color_str =
                             border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
-                        let (br, bg, bb, ba) = Self::parse_color(border_color_str);
+                        let resize_color_str = border_cfg
+                            .and_then(|b| b.resize_color.as_deref())
+                            .unwrap_or("#ff0000"); // 默认红色
+
+                        // 如果处于 Resize 模式，使用 resize_color，否则使用 normal_color
+                        let target_color_str = if state.is_resize_mode {
+                            resize_color_str
+                        } else {
+                            normal_color_str
+                        };
+                        let (br, bg, bb, ba) = Self::parse_color(target_color_str);
                         let is_smart = win_cfg
                             .map(|c| c.smart_borders.to_lowercase() == "true")
                             .unwrap_or(false);
@@ -712,7 +730,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             .set_tiled(crate::protocol::river_wm::river_window_v1::Edges::empty());
                     }
                 }
-                // 6. 后续清理：Waybar 激活与快捷键使能
+                // --- 6. 快捷键模式切换 ---
+                for kb in &state.key_bindings {
+                    match (state.is_resize_mode, kb.mode) {
+                        // Resize 模式下：启用 Resize 键，禁用 Normal 键
+                        (true, BindingMode::Resize) => kb.obj.enable(),
+                        (true, BindingMode::Normal) => kb.obj.disable(),
+                        // Normal 模式下：启用 Normal 键，禁用 Resize 键
+                        (false, BindingMode::Resize) => kb.obj.disable(),
+                        (false, BindingMode::Normal) => kb.obj.enable(),
+                    }
+                }
+                // 7. 后续清理：Waybar 激活与快捷键使能
                 if let Some(focused_name) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(focused_name) {
                         if let Some(ls_out) = &out_data.ls_output {
@@ -720,9 +749,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             ls_out.set_default();
                         }
                     }
-                }
-                for kb in &state.key_bindings {
-                    kb.obj.enable();
                 }
                 proxy.manage_finish();
             }

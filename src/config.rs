@@ -48,6 +48,9 @@ pub struct KeyboardConfig {
 pub struct BorderParams {
     pub width: String,
     pub color: String,
+    // 使用 serde(rename) 支持 resize_color 或 resize-color
+    #[serde(rename = "resize_color", alias = "resize-color")]
+    pub resize_color: Option<String>,
 }
 
 // 定义 active 分组
@@ -93,6 +96,7 @@ pub struct ActionConfig {
     pub action: String,
     pub args: Option<Vec<String>>,
     pub cmd: Option<String>,
+    pub unit: Option<String>,
 }
 
 // 4. 处理混合结构（直接按键 vs 分组按键）
@@ -112,6 +116,7 @@ pub enum KeyBindingEntry {
 pub struct Config {
     pub input: Option<InputConfig>,
     pub keybindings: Option<HashMap<String, KeyBindingEntry>>,
+    pub resize: Option<HashMap<String, KeyBindingEntry>>,
     pub waybar: Option<WaybarConfig>,
     pub output: Option<HashMap<String, OutputConfig>>,
     pub window: Option<WindowConfig>,
@@ -155,6 +160,7 @@ impl Config {
         Config {
             input: None,
             keybindings: None,
+            resize: None,
             waybar: None,
             output: None,
             window: None,

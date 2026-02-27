@@ -1,6 +1,6 @@
 use crate::protocol::river_wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocol::river_xkb::river_xkb_bindings_v1::RiverXkbBindingsV1;
-use crate::wm::{actions::Action, AppState, KeyBinding};
+use crate::wm::{actions::Action, AppState, KeyBinding,BindingMode};
 use tracing::{error, info, warn};
 use wayland_client::QueueHandle;
 use xkbcommon::xkb;
@@ -25,8 +25,6 @@ fn parse_mod_group(group: &str) -> Modifiers {
 }
 
 /// 辅助函数：真正向 River 注册绑定并存入 state
-// src/wm/binds.rs
-
 fn commit_binding(
     state: &mut AppState,
     mgr: &RiverXkbBindingsV1,
@@ -35,6 +33,7 @@ fn commit_binding(
     key_name: &str,
     mods: Modifiers,
     actions: Vec<Action>,
+    mode: BindingMode,
 ) {
     // 1. 尝试按原样查找 (例如 "Return", "space", "BackSpace")
     let mut keysym = xkb::keysym_from_name(key_name, xkb::KEYSYM_NO_FLAGS);
@@ -60,6 +59,7 @@ fn commit_binding(
     state.key_bindings.push(KeyBinding {
         obj: binding_obj,
         actions,
+        mode,
     });
 }
 
@@ -72,20 +72,44 @@ fn process_entry(
     key_or_mod: &str,
     current_mods: Modifiers,
     entry: &crate::config::KeyBindingEntry,
+    mode: BindingMode,
 ) {
     match entry {
         // 情况 1：单个动作
         crate::config::KeyBindingEntry::Action(cfg) => {
-            let actions = vec![Action::from_config(&cfg.action, &cfg.args, &cfg.cmd)];
-            commit_binding(state, mgr, seat, qh, key_or_mod, current_mods, actions);
+            let actions = vec![Action::from_config(
+                &cfg.action,
+                &cfg.args,
+                &cfg.cmd,
+                &cfg.unit,
+            )];
+            commit_binding(
+                state,
+                mgr,
+                seat,
+                qh,
+                key_or_mod,
+                current_mods,
+                actions,
+                mode,
+            );
         }
         // 情况 2：动作列表 [ {action=...}, {action=...} ]
         crate::config::KeyBindingEntry::List(cfgs) => {
             let actions = cfgs
                 .iter()
-                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd))
+                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit))
                 .collect();
-            commit_binding(state, mgr, seat, qh, key_or_mod, current_mods, actions);
+            commit_binding(
+                state,
+                mgr,
+                seat,
+                qh,
+                key_or_mod,
+                current_mods,
+                actions,
+                mode,
+            );
         }
         // 情况 3：修饰符分组 [keybindings.alt]
         crate::config::KeyBindingEntry::Group(sub_map) => {
@@ -95,7 +119,16 @@ fn process_entry(
 
             // 递归处理子项
             for (sub_key, sub_entry) in sub_map {
-                process_entry(state, mgr, seat, qh, sub_key, combined_mods, sub_entry);
+                process_entry(
+                    state,
+                    mgr,
+                    seat,
+                    qh,
+                    sub_key,
+                    combined_mods,
+                    sub_entry,
+                    mode,
+                );
             }
         }
     }
@@ -111,8 +144,9 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
         None => return,
     };
 
+    // --- 加载 Normal 绑定 ---
     if let Some(entries) = state.config.keybindings.clone() {
-        info!("-> Registering shortcut keys from configuration file...");
+        info!("-> Registering [Normal] keybindings...");
         for (key_or_mod, entry) in &entries {
             process_entry(
                 state,
@@ -122,13 +156,41 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
                 key_or_mod,
                 Modifiers::empty(),
                 entry,
+                BindingMode::Normal,
             );
         }
     } else {
-        warn!("-> 未发现快捷键配置，加载默认 Colemak 导航键位...");
+        // 默认键位也是 Normal
+        warn!("-> No keybindings found, loading defaults...");
         let defaults = crate::config::get_default_bindings();
         for b in defaults {
-            commit_binding(state, &xkb_mgr, &seat, qh, b.key, b.mods, vec![b.action]);
+            commit_binding(
+                state,
+                &xkb_mgr,
+                &seat,
+                qh,
+                b.key,
+                b.mods,
+                vec![b.action],
+                BindingMode::Normal,
+            );
+        }
+    }
+
+    // --- 加载 Resize 绑定 ---
+    if let Some(entries) = state.config.resize.clone() {
+        info!("-> Registering [Resize] keybindings...");
+        for (key_or_mod, entry) in &entries {
+            process_entry(
+                state,
+                &xkb_mgr,
+                &seat,
+                qh,
+                key_or_mod,
+                Modifiers::empty(),
+                entry,
+                BindingMode::Resize,
+            );
         }
     }
 }

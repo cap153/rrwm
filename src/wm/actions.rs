@@ -32,6 +32,13 @@ enum MoveHint {
     Bottommost, // 强制出现在最下方
 }
 
+// --- 调整方向枚举 ---
+#[derive(Debug, Clone, Copy)]
+pub enum ResizeAxis {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     CloseFocused,
@@ -47,11 +54,26 @@ pub enum Action {
     Spawn(Vec<String>),      // 纯净启动：[程序名, 参数1, 参数2]
     Shell(String),           // Shell 启动：一整串命令字符串
     ReloadConfiguration,     // 重载配置
+    ToggleResizeMode,
+    ExitResizeMode,
+    Resize(ResizeAxis, i32),  // 轴向, 增量(像素)
+    MoveStep(Direction, i32), // 方向, 步进(像素) - 用于 Resize 模式下的移动
 }
 
 impl Action {
     /// 核心逻辑：把 TOML 里的字符串配置变成代码里的枚举
-    pub fn from_config(name: &str, args: &Option<Vec<String>>, cmd: &Option<String>) -> Self {
+    pub fn from_config(
+        name: &str,
+        args: &Option<Vec<String>>,
+        cmd: &Option<String>,
+        unit: &Option<String>,
+    ) -> Self {
+        // 解析 unit，默认为 10 (如果配置了 resize 动作但没写 unit)
+        let step = unit
+            .as_ref()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(10);
+
         match name.to_lowercase().as_str() {
             // --- 内部指令：关闭窗口 ---
             "close_window" | "close_focused" => Action::CloseFocused,
@@ -65,7 +87,17 @@ impl Action {
             }
             // --- 内部指令：重载配置 ---
             "reload_configuration" => Action::ReloadConfiguration,
-            // --- 内部指令：焦点切换 ---
+
+            // --- Resize 模式控制 ---
+            "toggle_resize_mode" => Action::ToggleResizeMode,
+            "exit_resize_mode" => Action::ExitResizeMode,
+
+            // --- 尺寸调整指令 ---
+            "shrink_width" => Action::Resize(ResizeAxis::Horizontal, -step),
+            "grow_width" => Action::Resize(ResizeAxis::Horizontal, step),
+            "shrink_height" => Action::Resize(ResizeAxis::Vertical, -step),
+            "grow_height" => Action::Resize(ResizeAxis::Vertical, step),
+
             "focus" => {
                 let arg = args
                     .as_ref()
@@ -101,10 +133,37 @@ impl Action {
                     "right_output" => Action::MoveToOutput(Direction::Right),
                     "up_output" => Action::MoveToOutput(Direction::Up),
                     "down_output" => Action::MoveToOutput(Direction::Down),
-                    "left" => Action::Move(Direction::Left),
-                    "right" => Action::Move(Direction::Right),
-                    "up" => Action::Move(Direction::Up),
-                    "down" => Action::Move(Direction::Down),
+
+                    // --- 如果提供了 unit，则是 MoveStep，否则是 Move ---
+                    "left" => {
+                        if unit.is_some() {
+                            Action::MoveStep(Direction::Left, step)
+                        } else {
+                            Action::Move(Direction::Left)
+                        }
+                    }
+                    "right" => {
+                        if unit.is_some() {
+                            Action::MoveStep(Direction::Right, step)
+                        } else {
+                            Action::Move(Direction::Right)
+                        }
+                    }
+                    "up" => {
+                        if unit.is_some() {
+                            Action::MoveStep(Direction::Up, step)
+                        } else {
+                            Action::Move(Direction::Up)
+                        }
+                    }
+                    "down" => {
+                        if unit.is_some() {
+                            Action::MoveStep(Direction::Down, step)
+                        } else {
+                            Action::Move(Direction::Down)
+                        }
+                    }
+
                     _ => {
                         if let Ok(idx) = arg.parse::<u32>() {
                             Action::MoveToTag(1 << (idx.saturating_sub(1)))
@@ -116,10 +175,8 @@ impl Action {
             }
             // "spawn" 模式：直接启动，不经过 sh
             "spawn" => Action::Spawn(args.clone().unwrap_or_default()),
-
             // "shell" 模式：交给 sh -c 处理复杂逻辑
             "shell" => Action::Shell(cmd.clone().unwrap_or_default()),
-
             _ => {
                 warn!("Warning: Unknown action name {}", name);
                 Action::Shell("true".to_string())
@@ -764,8 +821,107 @@ impl AppState {
 
         (pr, pg, pb, a32)
     }
+
+    /// 辅助：判断是否可以进入 Resize 模式
+    fn can_enter_resize_mode(&self) -> bool {
+        // 1. 必须有焦点窗口
+        let f_id = match &self.focused_window {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // 2. 获取窗口数据
+        let w_data = match self.windows.iter().find(|w| w.id == *f_id) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // 3. 全屏窗口不允许 Resize
+        if w_data.is_fullscreen {
+            return false;
+        }
+
+        // 4. 悬浮窗口：总是允许 (可以调整大小或移动)
+        if w_data.is_floating {
+            return true;
+        }
+
+        // 5. 平铺窗口：只有当数量 > 1 时才允许
+        if let Some(out_name) = &w_data.output {
+            let mask = self.focused_tags; // 或者用 w_data.tags
+            let tiling_count = self
+                .windows
+                .iter()
+                .filter(|w| {
+                    w.output.as_ref() == Some(out_name)
+                        && (w.tags & mask) != 0
+                        && !w.is_floating
+                        && !w.is_fullscreen
+                })
+                .count();
+
+            return tiling_count > 1;
+        }
+
+        false
+    }
+
     pub fn perform_action(&mut self, action: Action) {
         match action {
+            // --- 切换 Resize 模式 ---
+            Action::ToggleResizeMode => {
+                if self.is_resize_mode {
+                    // 如果已经在模式中，则退出
+                    self.is_resize_mode = false;
+                    info!("-> [Mode] Exit Resize Mode");
+                    if let Some(wm) = &self.river_wm {
+                        wm.manage_dirty();
+                    }
+                } else {
+                    // 尝试进入
+                    if self.can_enter_resize_mode() {
+                        self.is_resize_mode = true;
+                        info!("-> [Mode] Enter Resize Mode");
+                        if let Some(wm) = &self.river_wm {
+                            wm.manage_dirty();
+                        }
+                    } else {
+                        warn!("-> [Mode] Cannot enter Resize Mode: No suitable window focused.");
+                    }
+                }
+            }
+
+            // --- 退出 Resize 模式 ---
+            Action::ExitResizeMode => {
+                if self.is_resize_mode {
+                    self.is_resize_mode = false;
+                    info!("-> [Mode] Force Exit Resize Mode");
+                    if let Some(wm) = &self.river_wm {
+                        wm.manage_dirty();
+                    }
+                }
+            }
+
+            // --- 占位：稍后实现具体的调整逻辑 ---
+            Action::Resize(axis, delta) => {
+                if self.is_resize_mode {
+                    info!(
+                        "-> [Resize] Axis: {:?}, Delta: {}px (Pending logic)",
+                        axis, delta
+                    );
+                    // TODO: 实现平铺/悬浮的调整算法
+                }
+            }
+
+            Action::MoveStep(dir, step) => {
+                if self.is_resize_mode {
+                    info!(
+                        "-> [Resize Move] Dir: {:?}, Step: {}px (Pending logic)",
+                        dir, step
+                    );
+                    // TODO: 实现悬浮窗的移动算法
+                }
+            }
             // --- 切换悬浮状态 ---
             Action::ToggleFloat => {
                 if let Some(f_id) = self.focused_window.clone() {
