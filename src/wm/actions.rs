@@ -1,5 +1,5 @@
 use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
-use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType, ResizeAxis};
+use crate::wm::layout::{Direction, Geometry, LayoutNode, ResizeAxis, SplitType};
 use crate::wm::AppState;
 use crate::wm::OutputData;
 use serde::Serialize;
@@ -286,10 +286,11 @@ impl AppState {
     /// 将窗口从一个物理显示器搬到另一个物理显示器（保持在当前 Tag）
     fn move_window_to_output(&mut self, win_id: &ObjectId, dir: Direction) {
         // 1. 获取窗口元数据
-        let (old_out_name, win_tags) = match self.windows.iter().find(|w| &w.id == win_id) {
-            Some(w) => (w.output.clone(), w.tags),
-            None => return,
-        };
+        let (old_out_name, win_tags, is_floating) =
+            match self.windows.iter().find(|w| &w.id == win_id) {
+                Some(w) => (w.output.clone(), w.tags, w.is_floating),
+                None => return,
+            };
         let old_out_name = match old_out_name {
             Some(n) => n,
             None => return,
@@ -333,10 +334,12 @@ impl AppState {
             );
 
             // 3. 从旧树移除
-            let old_key = (old_out_name.clone(), win_tags);
-            if let Some(root) = self.layout_roots.remove(&old_key) {
-                if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
-                    self.layout_roots.insert(old_key, new_root);
+            if !is_floating {
+                let old_key = (old_out_name.clone(), win_tags);
+                if let Some(root) = self.layout_roots.remove(&old_key) {
+                    if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
+                        self.layout_roots.insert(old_key, new_root);
+                    }
                 }
             }
 
@@ -348,40 +351,42 @@ impl AppState {
                 win_data = Some(w.clone());
             }
 
-            // 5. 【修正】执行多向插入
+            // 5. 执行多向插入
             if let Some(wd) = win_data {
                 let new_key = (next_out_name.clone(), target_monitor_tags);
-                if let Some(old_root) = self.layout_roots.remove(&new_key) {
-                    let new_root = match hint {
-                        MoveHint::Leftmost => LayoutNode::Container {
-                            split_type: SplitType::Vertical,
-                            ratio: 0.5,
-                            left_child: Box::new(LayoutNode::Window(wd)),
-                            right_child: Box::new(old_root),
-                        },
-                        MoveHint::Rightmost => LayoutNode::Container {
-                            split_type: SplitType::Vertical,
-                            ratio: 0.5,
-                            left_child: Box::new(old_root),
-                            right_child: Box::new(LayoutNode::Window(wd)),
-                        },
-                        MoveHint::Topmost => LayoutNode::Container {
-                            split_type: SplitType::Horizontal,
-                            ratio: 0.5,
-                            left_child: Box::new(LayoutNode::Window(wd)),
-                            right_child: Box::new(old_root),
-                        },
-                        MoveHint::Bottommost => LayoutNode::Container {
-                            split_type: SplitType::Horizontal,
-                            ratio: 0.5,
-                            left_child: Box::new(old_root),
-                            right_child: Box::new(LayoutNode::Window(wd)),
-                        },
-                    };
-                    self.layout_roots.insert(new_key.clone(), new_root);
-                } else {
-                    self.layout_roots
-                        .insert(new_key.clone(), LayoutNode::Window(wd));
+                if !is_floating {
+                    if let Some(old_root) = self.layout_roots.remove(&new_key) {
+                        let new_root = match hint {
+                            MoveHint::Leftmost => LayoutNode::Container {
+                                split_type: SplitType::Vertical,
+                                ratio: 0.5,
+                                left_child: Box::new(LayoutNode::Window(wd)),
+                                right_child: Box::new(old_root),
+                            },
+                            MoveHint::Rightmost => LayoutNode::Container {
+                                split_type: SplitType::Vertical,
+                                ratio: 0.5,
+                                left_child: Box::new(old_root),
+                                right_child: Box::new(LayoutNode::Window(wd)),
+                            },
+                            MoveHint::Topmost => LayoutNode::Container {
+                                split_type: SplitType::Horizontal,
+                                ratio: 0.5,
+                                left_child: Box::new(LayoutNode::Window(wd)),
+                                right_child: Box::new(old_root),
+                            },
+                            MoveHint::Bottommost => LayoutNode::Container {
+                                split_type: SplitType::Horizontal,
+                                ratio: 0.5,
+                                left_child: Box::new(old_root),
+                                right_child: Box::new(LayoutNode::Window(wd)),
+                            },
+                        };
+                        self.layout_roots.insert(new_key.clone(), new_root);
+                    } else {
+                        self.layout_roots
+                            .insert(new_key.clone(), LayoutNode::Window(wd));
+                    }
                 }
 
                 // 6. 状态同步
@@ -926,9 +931,16 @@ impl AppState {
                             if let Some(out_id) = out_name {
                                 let tree_key = (out_id.clone(), win_tags);
                                 // 取出显示器的屏幕大小，用于计算 delta_ratio
-                                let usable_area = self.outputs.get(&out_id).map(|o| o.usable_area)
-                                    .unwrap_or(Geometry { x: 0, y: 0, w: 1920, h: 1080 });
-                                
+                                let usable_area =
+                                    self.outputs.get(&out_id).map(|o| o.usable_area).unwrap_or(
+                                        Geometry {
+                                            x: 0,
+                                            y: 0,
+                                            w: 1920,
+                                            h: 1080,
+                                        },
+                                    );
+
                                 if let Some(root) = self.layout_roots.get_mut(&tree_key) {
                                     root.apply_resize(&f_id, usable_area, axis, delta);
                                 }
@@ -1521,8 +1533,9 @@ impl AppState {
         follow: bool,
         hint: MoveHint,
     ) {
-        let (old_tag, out_id) = match self.windows.iter().find(|w| &w.id == win_id) {
-            Some(w) => (w.tags, w.output.clone()),
+        // 获取窗口属性
+        let (old_tag, out_id, is_floating) = match self.windows.iter().find(|w| &w.id == win_id) {
+            Some(w) => (w.tags, w.output.clone(), w.is_floating),
             None => return,
         };
         let out_id = match out_id {
@@ -1536,7 +1549,7 @@ impl AppState {
         let old_key = (out_id.clone(), old_tag);
         let new_key = (out_id.clone(), target_mask);
 
-        // 1. 接班人逻辑 (使用 old_key)
+        // 接班人逻辑
         if self.tag_focus_history.get(&old_key) == Some(win_id) {
             let replacement = self
                 .windows
@@ -1545,86 +1558,80 @@ impl AppState {
                     &w.id != win_id && w.output.as_ref() == Some(&out_id) && (w.tags & old_tag) != 0
                 })
                 .map(|w| w.id.clone());
-
             if let Some(rid) = replacement {
-                self.tag_focus_history.insert(old_key.clone(), rid); // 【修正】使用 old_key.clone()
+                self.tag_focus_history.insert(old_key.clone(), rid);
             } else {
                 self.tag_focus_history.remove(&old_key);
             }
         }
 
-        // 2. 从旧树中移除 (使用 old_key)
-        if let Some(root) = self.layout_roots.remove(&old_key) {
-            if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
-                self.layout_roots.insert(old_key, new_root); // 【修正】这里用 old_key 原件就行
+        // --- 从旧树中移除 (仅限平铺窗口) ---
+        if !is_floating {
+            if let Some(root) = self.layout_roots.remove(&old_key) {
+                if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
+                    self.layout_roots.insert(old_key, new_root);
+                }
             }
         }
 
-        // 3. 更新窗口数据副本
+        // 更新窗口数据副本 (保持不变)
         let mut win_data_opt = None;
         if let Some(w_info) = self.windows.iter_mut().find(|w| &w.id == win_id) {
             w_info.tags = target_mask;
             win_data_opt = Some(w_info.clone());
         }
 
-        // 4. 插入新树
+        // --- 插入新树 (仅限平铺窗口) ---
         if let Some(w_data) = win_data_opt {
-            if let Some(old_root) = self.layout_roots.remove(&new_key) {
-                // 还原完整的 match 逻辑
-                let new_root = match hint {
-                    MoveHint::Leftmost => LayoutNode::Container {
-                        split_type: SplitType::Vertical,
-                        ratio: 0.5,
-                        left_child: Box::new(LayoutNode::Window(w_data)),
-                        right_child: Box::new(old_root),
-                    },
-                    MoveHint::Rightmost => LayoutNode::Container {
-                        split_type: SplitType::Vertical,
-                        ratio: 0.5,
-                        left_child: Box::new(old_root),
-                        right_child: Box::new(LayoutNode::Window(w_data)),
-                    },
-                    MoveHint::Topmost => LayoutNode::Container {
-                        split_type: SplitType::Horizontal,
-                        ratio: 0.5,
-                        left_child: Box::new(LayoutNode::Window(w_data)),
-                        right_child: Box::new(old_root),
-                    },
-                    MoveHint::Bottommost => LayoutNode::Container {
-                        split_type: SplitType::Horizontal,
-                        ratio: 0.5,
-                        left_child: Box::new(old_root),
-                        right_child: Box::new(LayoutNode::Window(w_data)),
-                    },
-                };
-                // 插入：使用 new_key.clone()
-                self.layout_roots.insert(new_key.clone(), new_root);
-            } else {
-                // 目标 Tag 是空的，直接做根节点
-                // 插入：使用 new_key.clone()
-                self.layout_roots
-                    .insert(new_key.clone(), LayoutNode::Window(w_data));
+            if !is_floating {
+                if let Some(old_root) = self.layout_roots.remove(&new_key) {
+                    let new_root = match hint {
+                        MoveHint::Leftmost => LayoutNode::Container {
+                            split_type: SplitType::Vertical,
+                            ratio: 0.5,
+                            left_child: Box::new(LayoutNode::Window(w_data)),
+                            right_child: Box::new(old_root),
+                        },
+                        MoveHint::Rightmost => LayoutNode::Container {
+                            split_type: SplitType::Vertical,
+                            ratio: 0.5,
+                            left_child: Box::new(old_root),
+                            right_child: Box::new(LayoutNode::Window(w_data)),
+                        },
+                        MoveHint::Topmost => LayoutNode::Container {
+                            split_type: SplitType::Horizontal,
+                            ratio: 0.5,
+                            left_child: Box::new(LayoutNode::Window(w_data)),
+                            right_child: Box::new(old_root),
+                        },
+                        MoveHint::Bottommost => LayoutNode::Container {
+                            split_type: SplitType::Horizontal,
+                            ratio: 0.5,
+                            left_child: Box::new(old_root),
+                            right_child: Box::new(LayoutNode::Window(w_data)),
+                        },
+                    };
+                    self.layout_roots.insert(new_key.clone(), new_root);
+                } else {
+                    self.layout_roots
+                        .insert(new_key.clone(), LayoutNode::Window(w_data));
+                }
             }
         }
 
-        // 5. 状态同步
+        // 状态同步
         self.tag_focus_history.insert(new_key, win_id.clone());
 
         if follow {
-            // 我们之前在函数开头已经拿到了 out_id (String 类型)
             if let Some(out_data) = self.outputs.get_mut(&out_id) {
                 info!(
                     "-> [Follow] Monitor {} Switch perspective to new tab mask: {:b}",
                     out_id, target_mask
                 );
                 out_data.tags = target_mask;
-
-                // 同步给影子变量，确保后续渲染和状态栏逻辑一致
                 self.focused_tags = target_mask;
             }
-
             self.focused_window = Some(win_id.clone());
-            // 确保当前活跃显示器也是这一个
             self.focused_output = Some(out_id);
         }
         if let Some(wm) = &self.river_wm {
@@ -1691,15 +1698,31 @@ impl AppState {
 
     /// 本地移动：在同一 Tag 内重新排列
     fn move_window_locally(&mut self, win_id: &ObjectId, dir: Direction) {
-        let out_id = match self
-            .windows
-            .iter()
-            .find(|w| &w.id == win_id)
-            .and_then(|w| w.output.clone())
-        {
+        let (out_id_opt, is_floating) = match self.windows.iter().find(|w| &w.id == win_id) {
+            Some(w) => (w.output.clone(), w.is_floating),
+            None => return,
+        };
+        let out_id = match out_id_opt {
             Some(id) => id,
             None => return,
         };
+        // --- 悬浮窗口专用逻辑 ---
+        if is_floating {
+            match dir {
+                Direction::Left => {
+                    info!("-> [Move Float] Cross tag to previous.");
+                    self.move_window_relative(win_id, -1, MoveHint::Rightmost);
+                }
+                Direction::Right => {
+                    info!("-> [Move Float] Cross tag to next.");
+                    self.move_window_relative(win_id, 1, MoveHint::Leftmost);
+                }
+                _ => {
+                    info!("-> [Move Float] Up/Down movement across tags is not supported.");
+                }
+            }
+            return; // 悬浮窗处理完毕，直接返回
+        }
         // 1. 尝试在当前方向寻找邻居
         if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
             info!(
