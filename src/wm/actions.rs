@@ -1,5 +1,5 @@
 use crate::protocol::wlr_output_management::zwlr_output_mode_v1::ZwlrOutputModeV1;
-use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType};
+use crate::wm::layout::{Direction, Geometry, LayoutNode, SplitType, ResizeAxis};
 use crate::wm::AppState;
 use crate::wm::OutputData;
 use serde::Serialize;
@@ -30,13 +30,6 @@ enum MoveHint {
     Rightmost,  // 强制出现在最右边
     Topmost,    // 强制出现在最上方
     Bottommost, // 强制出现在最下方
-}
-
-// --- 调整方向枚举 ---
-#[derive(Debug, Clone, Copy)]
-pub enum ResizeAxis {
-    Horizontal,
-    Vertical,
 }
 
 #[derive(Debug, Clone)]
@@ -902,24 +895,75 @@ impl AppState {
                 }
             }
 
-            // --- 占位：稍后实现具体的调整逻辑 ---
+            // --- 尺寸调整指令 ---
             Action::Resize(axis, delta) => {
                 if self.is_resize_mode {
-                    info!(
-                        "-> [Resize] Axis: {:?}, Delta: {}px (Pending logic)",
-                        axis, delta
-                    );
-                    // TODO: 实现平铺/悬浮的调整算法
+                    if let Some(f_id) = self.focused_window.clone() {
+                        let mut is_floating = false;
+                        let mut out_name = None;
+                        let mut win_tags = 0;
+
+                        if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                            is_floating = w.is_floating;
+                            out_name = w.output.clone();
+                            win_tags = w.tags;
+                        }
+
+                        if is_floating {
+                            // --- 悬浮窗口调整：直接改数值，设个最小兜底 ---
+                            if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                                match axis {
+                                    ResizeAxis::Horizontal => {
+                                        w.float_geo.w = (w.float_geo.w + delta).max(50);
+                                    }
+                                    ResizeAxis::Vertical => {
+                                        w.float_geo.h = (w.float_geo.h + delta).max(50);
+                                    }
+                                }
+                            }
+                        } else {
+                            // --- 平铺窗口调整：召唤 BSP 树魔法 ---
+                            if let Some(out_id) = out_name {
+                                let tree_key = (out_id.clone(), win_tags);
+                                // 取出显示器的屏幕大小，用于计算 delta_ratio
+                                let usable_area = self.outputs.get(&out_id).map(|o| o.usable_area)
+                                    .unwrap_or(Geometry { x: 0, y: 0, w: 1920, h: 1080 });
+                                
+                                if let Some(root) = self.layout_roots.get_mut(&tree_key) {
+                                    root.apply_resize(&f_id, usable_area, axis, delta);
+                                }
+                            }
+                        }
+
+                        // 强制刷新渲染
+                        if let Some(wm) = &self.river_wm {
+                            wm.manage_dirty();
+                        }
+                    }
                 }
             }
 
+            // --- 移动悬浮窗口指令 ---
             Action::MoveStep(dir, step) => {
                 if self.is_resize_mode {
-                    info!(
-                        "-> [Resize Move] Dir: {:?}, Step: {}px (Pending logic)",
-                        dir, step
-                    );
-                    // TODO: 实现悬浮窗的移动算法
+                    if let Some(f_id) = self.focused_window.clone() {
+                        if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                            if w.is_floating {
+                                match dir {
+                                    Direction::Left => w.float_geo.x -= step,
+                                    Direction::Right => w.float_geo.x += step,
+                                    Direction::Up => w.float_geo.y -= step,
+                                    Direction::Down => w.float_geo.y += step,
+                                }
+                                if let Some(wm) = &self.river_wm {
+                                    wm.manage_dirty();
+                                }
+                            } else {
+                                // 如果你是平铺窗口，MoveStep 没有任何意义，忽略
+                                info!("-> [Resize] Cannot move tiling window via MoveStep.");
+                            }
+                        }
+                    }
                 }
             }
             // --- 切换悬浮状态 ---

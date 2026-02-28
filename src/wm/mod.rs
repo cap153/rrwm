@@ -682,8 +682,17 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let border_val = border_cfg
                     .and_then(|b| b.width.parse::<u32>().ok())
                     .unwrap_or(0);
-                let border_color_str = border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
-                let (br, bg, bb, ba) = Self::parse_color(border_color_str);
+                let normal_color_str = border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
+                let resize_color_str = border_cfg
+                    .and_then(|b| b.resize_color.as_deref())
+                    .unwrap_or("#ff0000"); // 默认红色
+
+                let target_color_str = if state.is_resize_mode {
+                    resize_color_str
+                } else {
+                    normal_color_str
+                };
+                let (br, bg, bb, ba) = Self::parse_color(target_color_str);
 
                 for w_data in state.windows.iter_mut() {
                     if w_data.is_floating && !w_data.is_fullscreen {

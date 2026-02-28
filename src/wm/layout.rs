@@ -2,6 +2,13 @@ use crate::protocol::river_wm::river_window_v1::RiverWindowV1;
 use crate::wm::WindowData;
 use wayland_backend::client::ObjectId;
 
+// --- 调整轴向枚举 ---
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResizeAxis {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SplitType {
     Horizontal,
@@ -22,6 +29,14 @@ pub struct Geometry {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+// --- 递归查找的反馈状态 ---
+#[derive(Debug, PartialEq)]
+pub enum ResizeResult {
+    NotFound,
+    FoundNeedResize, // 找到了目标，但当前容器方向不对，请求祖先容器处理
+    Handled,         // 已经成功调整
 }
 
 pub enum LayoutNode {
@@ -143,6 +158,109 @@ impl LayoutNode {
                 }
             }
             perform_swap(node, id1, &data1, id2, &data2);
+        }
+    }
+
+    // --- 核心 BSP 树调整算法 ---
+    pub fn apply_resize(
+        &mut self,
+        target_id: &ObjectId,
+        area: Geometry,
+        axis: ResizeAxis,
+        delta: i32,
+    ) -> ResizeResult {
+        match self {
+            LayoutNode::Window(w_data) => {
+                // 如果是叶子节点，且是目标窗口，向上报告“我需要调整！”
+                if &w_data.id == target_id {
+                    ResizeResult::FoundNeedResize
+                } else {
+                    ResizeResult::NotFound
+                }
+            }
+            LayoutNode::Container {
+                split_type,
+                ratio,
+                left_child,
+                right_child,
+            } => {
+                // 1. 预先计算子区域尺寸，以便后面能算出准确的像素比例
+                let (left_area, right_area) = if *split_type == SplitType::Vertical {
+                    let left_w = (area.w as f32 * *ratio) as i32;
+                    (
+                        Geometry { w: left_w, ..area },
+                        Geometry {
+                            x: area.x + left_w,
+                            w: area.w - left_w,
+                            ..area
+                        },
+                    )
+                } else {
+                    let top_h = (area.h as f32 * *ratio) as i32;
+                    (
+                        Geometry { h: top_h, ..area },
+                        Geometry {
+                            y: area.y + top_h,
+                            h: area.h - top_h,
+                            ..area
+                        },
+                    )
+                };
+
+                // 2. 递归寻找目标，先找左边，再找右边
+                let mut res = left_child.apply_resize(target_id, left_area, axis, delta);
+                let mut is_left = true;
+
+                if res == ResizeResult::NotFound {
+                    res = right_child.apply_resize(target_id, right_area, axis, delta);
+                    is_left = false;
+                }
+
+                // 3. 如果孩子报告需要调整，说明目标就在这棵子树里
+                if res == ResizeResult::FoundNeedResize {
+                    // 判断当前容器的切割方向，是否与用户想要调整的轴向匹配？
+                    // 水平调整宽度 -> 需要移动垂直分割线
+                    // 垂直调整高度 -> 需要移动水平分割线
+                    let matches = match (*split_type, axis) {
+                        (SplitType::Vertical, ResizeAxis::Horizontal) => true,
+                        (SplitType::Horizontal, ResizeAxis::Vertical) => true,
+                        _ => false,
+                    };
+
+                    if matches {
+                        // 匹配成功！当前容器就是“最近的有效分割线”，执行调整。
+                        let total_px = if *split_type == SplitType::Vertical {
+                            area.w
+                        } else {
+                            area.h
+                        } as f32;
+
+                        if total_px > 0.0 {
+                            let delta_ratio = delta as f32 / total_px;
+
+                            // 数学逻辑：
+                            // 如果目标在左边(is_left)，增长(+delta)意味着左边变大，ratio 增加。
+                            // 如果目标在右边(!is_left)，增长(+delta)意味着右边变大，左边必须缩小，ratio 减少。
+                            let mut new_ratio = if is_left {
+                                *ratio + delta_ratio
+                            } else {
+                                *ratio - delta_ratio
+                            };
+
+                            // 安全钳制：防止把窗口挤压到 0 导致崩溃或除零错误
+                            new_ratio = new_ratio.clamp(0.05, 0.95);
+                            *ratio = new_ratio;
+                        }
+                        return ResizeResult::Handled;
+                    } else {
+                        // 虽然目标在我这里，但我切错方向了，帮不上忙。
+                        // 把“锅”继续甩给上一级祖先容器。
+                        return ResizeResult::FoundNeedResize;
+                    }
+                }
+
+                res
+            }
         }
     }
 }
