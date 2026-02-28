@@ -286,17 +286,17 @@ impl AppState {
     /// 将窗口从一个物理显示器搬到另一个物理显示器（保持在当前 Tag）
     fn move_window_to_output(&mut self, win_id: &ObjectId, dir: Direction) {
         // 1. 获取窗口元数据
-        let (old_out_name, win_tags, is_floating) =
+        let (old_out_name_opt, win_tags, is_floating) =
             match self.windows.iter().find(|w| &w.id == win_id) {
                 Some(w) => (w.output.clone(), w.tags, w.is_floating),
                 None => return,
             };
-        let old_out_name = match old_out_name {
+        let old_out_name = match old_out_name_opt {
             Some(n) => n,
             None => return,
         };
 
-        // 2. 寻找目标显示器 (按轴排序逻辑保持不变)
+        // 2. 寻找目标显示器
         let mut sorted: Vec<_> = self.outputs.iter().collect();
         sorted.sort_by_key(|(_, data)| match dir {
             Direction::Left | Direction::Right => data.usable_area.x,
@@ -316,7 +316,17 @@ impl AppState {
             let next_out_name = next_out_name.clone();
             let target_monitor_tags = next_out_data.tags;
 
-            // --- 【核心逻辑】根据方向决定“着陆位置” ---
+            // --- 计算悬浮窗口的坐标偏移量 ---
+            let mut offset_x = 0;
+            let mut offset_y = 0;
+            if is_floating {
+                if let Some(old_out_data) = self.outputs.get(&old_out_name) {
+                    offset_x = next_out_data.usable_area.x - old_out_data.usable_area.x;
+                    offset_y = next_out_data.usable_area.y - old_out_data.usable_area.y;
+                }
+            }
+
+            // 平铺窗口着陆位置
             // 向右推 -> 从左边入 (Leftmost)
             // 向左推 -> 从右边入 (Rightmost)
             // 向下推 -> 从顶端入 (Topmost)
@@ -332,8 +342,7 @@ impl AppState {
                 "-> [Cross-screen transfer] The window is moved from {} to {} (location: {:?})",
                 old_out_name, next_out_name, hint
             );
-
-            // 3. 从旧树移除
+            // 3. 从旧树移除 (仅限平铺)
             if !is_floating {
                 let old_key = (old_out_name.clone(), win_tags);
                 if let Some(root) = self.layout_roots.remove(&old_key) {
@@ -348,10 +357,32 @@ impl AppState {
             if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
                 w.output = Some(next_out_name.clone());
                 w.tags = target_monitor_tags;
+
+                // --- 应用偏移，并进行安全钳制 ---
+                if is_floating {
+                    let new_x = w.float_geo.x + offset_x;
+                    let new_y = w.float_geo.y + offset_y;
+
+                    // 防止跨到小分辨率屏幕时窗口飞到屏幕外面
+                    let max_x =
+                        next_out_data.usable_area.x + next_out_data.usable_area.w - w.float_geo.w;
+                    let max_y =
+                        next_out_data.usable_area.y + next_out_data.usable_area.h - w.float_geo.h;
+
+                    w.float_geo.x = new_x.clamp(
+                        next_out_data.usable_area.x,
+                        max_x.max(next_out_data.usable_area.x),
+                    );
+                    w.float_geo.y = new_y.clamp(
+                        next_out_data.usable_area.y,
+                        max_y.max(next_out_data.usable_area.y),
+                    );
+                }
+
                 win_data = Some(w.clone());
             }
 
-            // 5. 执行多向插入
+            // 5. 执行多向插入 (仅限平铺)
             if let Some(wd) = win_data {
                 let new_key = (next_out_name.clone(), target_monitor_tags);
                 if !is_floating {
@@ -360,35 +391,34 @@ impl AppState {
                             MoveHint::Leftmost => LayoutNode::Container {
                                 split_type: SplitType::Vertical,
                                 ratio: 0.5,
-                                left_child: Box::new(LayoutNode::Window(wd)),
+                                left_child: Box::new(LayoutNode::Window(wd.clone())),
                                 right_child: Box::new(old_root),
                             },
                             MoveHint::Rightmost => LayoutNode::Container {
                                 split_type: SplitType::Vertical,
                                 ratio: 0.5,
                                 left_child: Box::new(old_root),
-                                right_child: Box::new(LayoutNode::Window(wd)),
+                                right_child: Box::new(LayoutNode::Window(wd.clone())),
                             },
                             MoveHint::Topmost => LayoutNode::Container {
                                 split_type: SplitType::Horizontal,
                                 ratio: 0.5,
-                                left_child: Box::new(LayoutNode::Window(wd)),
+                                left_child: Box::new(LayoutNode::Window(wd.clone())),
                                 right_child: Box::new(old_root),
                             },
                             MoveHint::Bottommost => LayoutNode::Container {
                                 split_type: SplitType::Horizontal,
                                 ratio: 0.5,
                                 left_child: Box::new(old_root),
-                                right_child: Box::new(LayoutNode::Window(wd)),
+                                right_child: Box::new(LayoutNode::Window(wd.clone())),
                             },
                         };
                         self.layout_roots.insert(new_key.clone(), new_root);
                     } else {
                         self.layout_roots
-                            .insert(new_key.clone(), LayoutNode::Window(wd));
+                            .insert(new_key.clone(), LayoutNode::Window(wd.clone()));
                     }
                 }
-
                 // 6. 状态同步
                 self.focused_output = Some(next_out_name);
                 self.focused_tags = target_monitor_tags;
@@ -399,10 +429,18 @@ impl AppState {
                     wm.manage_dirty();
                 }
 
-                // 鼠标直接跳到目标显示器中心
-                let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
-                let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
-                self.pending_pointer_warp = Some((cx, cy));
+                // --- 鼠标瞬移逻辑 ---
+                if is_floating {
+                    // 悬浮窗口移动后，鼠标跟随到窗口中心
+                    let cx = wd.float_geo.x + (wd.float_geo.w / 2);
+                    let cy = wd.float_geo.y + (wd.float_geo.h / 2);
+                    self.pending_pointer_warp = Some((cx, cy));
+                } else {
+                    // 平铺窗口移动后，鼠标跟随到新屏幕中心
+                    let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
+                    let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
+                    self.pending_pointer_warp = Some((cx, cy));
+                }
             }
         }
     }
