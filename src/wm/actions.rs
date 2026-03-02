@@ -316,6 +316,15 @@ impl AppState {
             let next_out_name = next_out_name.clone();
             let target_monitor_tags = next_out_data.tags;
 
+            // --- 【全屏踢馆逻辑】 ---
+            // 跨屏幕移动时，如果目标屏幕当前正在显示的 Tag 有全屏窗口，将其降级
+            for w in self.windows.iter_mut() {
+                if w.output.as_ref() == Some(&next_out_name) && (w.tags & target_monitor_tags) != 0 && w.is_fullscreen {
+                    info!("->[Move] Demoting fullscreen window {:?} on target monitor.", w.id);
+                    w.is_fullscreen = false;
+                }
+            }
+
             // --- 计算悬浮窗口的坐标偏移量 ---
             let mut offset_x = 0;
             let mut offset_y = 0;
@@ -1582,6 +1591,14 @@ impl AppState {
         };
         if old_tag == target_mask {
             return;
+        }
+        // --- 【全屏踢馆逻辑】 ---
+        // 检查目标显示器的目标 Tag 下，是否有正在全屏的窗口。如果有，强行取消它的全屏状态。
+        for w in self.windows.iter_mut() {
+            if w.output.as_ref() == Some(&out_id) && (w.tags & target_mask) != 0 && w.is_fullscreen {
+                info!("-> [Move] Demoting fullscreen window {:?} to welcome incoming window.", w.id);
+                w.is_fullscreen = false;
+            }
         }
 
         let old_key = (out_id.clone(), old_tag);
