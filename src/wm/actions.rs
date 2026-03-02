@@ -319,19 +319,15 @@ impl AppState {
             // --- 【全屏踢馆逻辑】 ---
             // 跨屏幕移动时，如果目标屏幕当前正在显示的 Tag 有全屏窗口，将其降级
             for w in self.windows.iter_mut() {
-                if w.output.as_ref() == Some(&next_out_name) && (w.tags & target_monitor_tags) != 0 && w.is_fullscreen {
-                    info!("->[Move] Demoting fullscreen window {:?} on target monitor.", w.id);
+                if w.output.as_ref() == Some(&next_out_name)
+                    && (w.tags & target_monitor_tags) != 0
+                    && w.is_fullscreen
+                {
+                    info!(
+                        "->[Move] Demoting fullscreen window {:?} on target monitor.",
+                        w.id
+                    );
                     w.is_fullscreen = false;
-                }
-            }
-
-            // --- 计算悬浮窗口的坐标偏移量 ---
-            let mut offset_x = 0;
-            let mut offset_y = 0;
-            if is_floating {
-                if let Some(old_out_data) = self.outputs.get(&old_out_name) {
-                    offset_x = next_out_data.usable_area.x - old_out_data.usable_area.x;
-                    offset_y = next_out_data.usable_area.y - old_out_data.usable_area.y;
                 }
             }
 
@@ -360,32 +356,29 @@ impl AppState {
                     }
                 }
             }
-
+            // --- 【提前计算悬浮坐标】 ---
+            let mut new_float_geo = None;
+            if is_floating {
+                if let Some(w) = self.windows.iter().find(|w| w.id == *win_id) {
+                    new_float_geo = Some(self.calculate_floating_geometry(
+                        win_id,
+                        &next_out_name,
+                        target_monitor_tags,
+                        next_out_data.usable_area,
+                        w.float_geo.w,
+                        w.float_geo.h,
+                    ));
+                }
+            }
             // 4. 更新元数据
             let mut win_data = None;
             if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
                 w.output = Some(next_out_name.clone());
                 w.tags = target_monitor_tags;
 
-                // --- 应用偏移，并进行安全钳制 ---
-                if is_floating {
-                    let new_x = w.float_geo.x + offset_x;
-                    let new_y = w.float_geo.y + offset_y;
-
-                    // 防止跨到小分辨率屏幕时窗口飞到屏幕外面
-                    let max_x =
-                        next_out_data.usable_area.x + next_out_data.usable_area.w - w.float_geo.w;
-                    let max_y =
-                        next_out_data.usable_area.y + next_out_data.usable_area.h - w.float_geo.h;
-
-                    w.float_geo.x = new_x.clamp(
-                        next_out_data.usable_area.x,
-                        max_x.max(next_out_data.usable_area.x),
-                    );
-                    w.float_geo.y = new_y.clamp(
-                        next_out_data.usable_area.y,
-                        max_y.max(next_out_data.usable_area.y),
-                    );
+                // --- 【应用计算好的悬浮坐标】 ---
+                if let Some(geo) = new_float_geo {
+                    w.float_geo = geo;
                 }
 
                 win_data = Some(w.clone());
@@ -400,32 +393,32 @@ impl AppState {
                             MoveHint::Leftmost => LayoutNode::Container {
                                 split_type: SplitType::Vertical,
                                 ratio: 0.5,
-                                left_child: Box::new(LayoutNode::Window(wd.clone())),
+                                left_child: Box::new(LayoutNode::Window(wd)),
                                 right_child: Box::new(old_root),
                             },
                             MoveHint::Rightmost => LayoutNode::Container {
                                 split_type: SplitType::Vertical,
                                 ratio: 0.5,
                                 left_child: Box::new(old_root),
-                                right_child: Box::new(LayoutNode::Window(wd.clone())),
+                                right_child: Box::new(LayoutNode::Window(wd)),
                             },
                             MoveHint::Topmost => LayoutNode::Container {
                                 split_type: SplitType::Horizontal,
                                 ratio: 0.5,
-                                left_child: Box::new(LayoutNode::Window(wd.clone())),
+                                left_child: Box::new(LayoutNode::Window(wd)),
                                 right_child: Box::new(old_root),
                             },
                             MoveHint::Bottommost => LayoutNode::Container {
                                 split_type: SplitType::Horizontal,
                                 ratio: 0.5,
                                 left_child: Box::new(old_root),
-                                right_child: Box::new(LayoutNode::Window(wd.clone())),
+                                right_child: Box::new(LayoutNode::Window(wd)),
                             },
                         };
                         self.layout_roots.insert(new_key.clone(), new_root);
                     } else {
                         self.layout_roots
-                            .insert(new_key.clone(), LayoutNode::Window(wd.clone()));
+                            .insert(new_key.clone(), LayoutNode::Window(wd));
                     }
                 }
                 // 6. 状态同步
@@ -438,18 +431,10 @@ impl AppState {
                     wm.manage_dirty();
                 }
 
-                // --- 鼠标瞬移逻辑 ---
-                if is_floating {
-                    // 悬浮窗口移动后，鼠标跟随到窗口中心
-                    let cx = wd.float_geo.x + (wd.float_geo.w / 2);
-                    let cy = wd.float_geo.y + (wd.float_geo.h / 2);
-                    self.pending_pointer_warp = Some((cx, cy));
-                } else {
-                    // 平铺窗口移动后，鼠标跟随到新屏幕中心
-                    let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
-                    let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
-                    self.pending_pointer_warp = Some((cx, cy));
-                }
+                // 窗口移动后，鼠标跟随到新屏幕中心
+                let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
+                let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
+                self.pending_pointer_warp = Some((cx, cy));
             }
         }
     }
@@ -1056,48 +1041,12 @@ impl AppState {
                             // 2. 计算悬浮几何信息 (Geometry)
                             if let Some(out_data) = self.outputs.get(&out_name) {
                                 let screen = out_data.usable_area;
-                                let w = (screen.w as f32 * 0.6) as i32;
-                                let h = (screen.h as f32 * 0.6) as i32;
+                                let default_w = (screen.w as f32 * 0.6) as i32;
+                                let default_h = (screen.h as f32 * 0.6) as i32;
 
-                                // 基准中心点 (Slot 0 的位置)
-                                let base_x = screen.x + (screen.w - w) / 2;
-                                let base_y = screen.y + (screen.h - h) / 2;
-                                let step = 25;
-
-                                // --- 智能空位查找算法 ---
-                                let mut final_slot = 0;
-
-                                // 我们尝试从 0 到 10 个位置
-                                for slot in 0..10 {
-                                    let test_x = base_x + (slot * step);
-                                    let test_y = base_y + (slot * step);
-
-                                    // 检查是否有任何现存的悬浮窗口占用了这个位置
-                                    // 排除掉自己 (f_id)
-                                    let collision = self.windows.iter().any(|other| {
-                                        other.id != f_id
-                                            && other.is_floating
-                                            && other.output.as_ref() == Some(&out_name)
-                                            && (other.tags & win_tags) != 0 // 只有同一 Tag 下的窗口才算作“障碍物”
-                                            && (other.float_geo.x - test_x).abs() < 5
-                                            && (other.float_geo.y - test_y).abs() < 5
-                                    });
-
-                                    if !collision {
-                                        final_slot = slot;
-                                        break; // 找到空位，停止查找
-                                    }
-                                }
-
-                                let offset = final_slot * step;
-
-                                // 存入 float_geo
-                                self.windows[idx].float_geo = Geometry {
-                                    x: base_x + offset,
-                                    y: base_y + offset,
-                                    w,
-                                    h,
-                                };
+                                self.windows[idx].float_geo = self.calculate_floating_geometry(
+                                    &f_id, &out_name, win_tags, screen, default_w, default_h,
+                                );
                             }
                         } else {
                             // --- Case B: 悬浮 -> 平铺 ---
@@ -1595,8 +1544,12 @@ impl AppState {
         // --- 【全屏踢馆逻辑】 ---
         // 检查目标显示器的目标 Tag 下，是否有正在全屏的窗口。如果有，强行取消它的全屏状态。
         for w in self.windows.iter_mut() {
-            if w.output.as_ref() == Some(&out_id) && (w.tags & target_mask) != 0 && w.is_fullscreen {
-                info!("-> [Move] Demoting fullscreen window {:?} to welcome incoming window.", w.id);
+            if w.output.as_ref() == Some(&out_id) && (w.tags & target_mask) != 0 && w.is_fullscreen
+            {
+                info!(
+                    "-> [Move] Demoting fullscreen window {:?} to welcome incoming window.",
+                    w.id
+                );
                 w.is_fullscreen = false;
             }
         }
@@ -1629,10 +1582,32 @@ impl AppState {
             }
         }
 
+        // --- 提前计算悬浮坐标 ---
+        let mut new_float_geo = None;
+        if is_floating {
+            if let Some(out_data) = self.outputs.get(&out_id) {
+                if let Some(w) = self.windows.iter().find(|w| w.id == *win_id) {
+                    new_float_geo = Some(self.calculate_floating_geometry(
+                        win_id,
+                        &out_id,
+                        target_mask,
+                        out_data.usable_area,
+                        w.float_geo.w,
+                        w.float_geo.h,
+                    ));
+                }
+            }
+        }
+
         // 更新窗口数据副本 (保持不变)
         let mut win_data_opt = None;
         if let Some(w_info) = self.windows.iter_mut().find(|w| &w.id == win_id) {
             w_info.tags = target_mask;
+            // --- 【应用计算好的悬浮坐标】 ---
+            if let Some(geo) = new_float_geo {
+                w_info.float_geo = geo;
+            }
+
             win_data_opt = Some(w_info.clone());
         }
 
@@ -1999,5 +1974,58 @@ impl AppState {
             })
             .min_by_key(|&(_, score)| score)
             .map(|(id, _)| id)
+    }
+    /// 辅助：计算悬浮窗口的智能空位坐标 (避免重叠，自适应屏幕)
+    fn calculate_floating_geometry(
+        &self,
+        win_id: &ObjectId,
+        out_name: &str,
+        target_tags: u32,
+        screen: Geometry,
+        mut req_w: i32,
+        mut req_h: i32,
+    ) -> Geometry {
+        // 1. 如果请求的尺寸大于目标屏幕，则自动缩放以适应屏幕
+        if req_w > screen.w {
+            req_w = (screen.w as f32 * 0.6) as i32;
+        }
+        if req_h > screen.h {
+            req_h = (screen.h as f32 * 0.6) as i32;
+        }
+
+        // 2. 计算基准中心点 (Slot 0)
+        let base_x = screen.x + (screen.w - req_w) / 2;
+        let base_y = screen.y + (screen.h - req_h) / 2;
+        let step = 25;
+
+        let mut final_slot = 0;
+
+        // 3. 寻找 0 到 10 的空位
+        for slot in 0..10 {
+            let test_x = base_x + (slot * step);
+            let test_y = base_y + (slot * step);
+
+            let collision = self.windows.iter().any(|other| {
+                other.id != *win_id
+                    && other.is_floating
+                    && other.output.as_deref() == Some(out_name)
+                    && (other.tags & target_tags) != 0
+                    && (other.float_geo.x - test_x).abs() < 5
+                    && (other.float_geo.y - test_y).abs() < 5
+            });
+
+            if !collision {
+                final_slot = slot;
+                break;
+            }
+        }
+
+        let offset = final_slot * step;
+        Geometry {
+            x: base_x + offset,
+            y: base_y + offset,
+            w: req_w,
+            h: req_h,
+        }
     }
 }
