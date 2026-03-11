@@ -64,6 +64,8 @@ pub struct ActiveConfig {
 pub struct WindowRuleMatch {
     pub appid: String,
     pub icon: String,
+    pub width: Option<String>,
+    pub height: Option<String>,
 }
 
 // --- 定义 rule 分组 ---

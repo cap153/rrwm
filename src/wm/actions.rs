@@ -1067,8 +1067,12 @@ impl AppState {
                                     .unwrap_or(f_id.clone());
 
                                 // 如果 insert_at 返回 false（没找到 target），我们就把 root 和新窗口组成一个新的 Container
-                                if !root.insert_at(&target_id, w_data.clone(), SplitType::Vertical)
-                                {
+                                if !root.insert_at(
+                                    &target_id,
+                                    w_data.clone(),
+                                    SplitType::Vertical,
+                                    None,
+                                ) {
                                     // 没找到插入点，强行合并
                                     let new_root = LayoutNode::Container {
                                         split_type: SplitType::Vertical,
@@ -2027,5 +2031,19 @@ impl AppState {
             w: req_w,
             h: req_h,
         }
+    }
+    // --- 把 "25%" 或 "1000" 转为小数比例 (0.0~1.0) ---
+    pub fn parse_dimension_ratio(val_str: &str, total_px: i32) -> f32 {
+        let val_str = val_str.trim();
+        if val_str.ends_with('%') {
+            if let Ok(percent) = val_str.trim_end_matches('%').parse::<f32>() {
+                return percent / 100.0;
+            }
+        } else if let Ok(px) = val_str.parse::<i32>() {
+            if total_px > 0 {
+                return px as f32 / total_px as f32;
+            }
+        }
+        0.5 // 解析失败默认给一半
     }
 }

@@ -1117,25 +1117,63 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             .cloned()
                             .unwrap_or_else(|| id.clone());
 
-                        let split = if let Some(geo) = state.last_geometry.get(&target_id) {
-                            if geo.w > geo.h {
+                        // --- 判断方向并计算自定义比例 ---
+                        let mut split = SplitType::Vertical;
+                        let mut custom_ratio = None;
+
+                        if let Some(geo) = state.last_geometry.get(&target_id) {
+                            split = if geo.w > geo.h {
                                 SplitType::Vertical
                             } else {
                                 SplitType::Horizontal
+                            };
+
+                            // 查询是否有宽高预设
+                            if let Some(app_id_str) = &w_data.app_id {
+                                if let Some(rules) = state
+                                    .config
+                                    .window
+                                    .as_ref()
+                                    .and_then(|w| w.rule.as_ref())
+                                    .and_then(|r| r.matches.as_ref())
+                                {
+                                    if let Some(rule) = rules.iter().find(|r| {
+                                        app_id_str.to_lowercase().contains(&r.appid.to_lowercase())
+                                    }) {
+                                        if split == SplitType::Vertical {
+                                            // 水平切分，应用宽度预设
+                                            if let Some(w_str) = &rule.width {
+                                                let desired_ratio =
+                                                    AppState::parse_dimension_ratio(w_str, geo.w);
+                                                // 新窗口是右孩子，所以要给它 1.0 - ratio
+                                                custom_ratio =
+                                                    Some((1.0 - desired_ratio).clamp(0.05, 0.95));
+                                                info!("-> [Layout] Applied width preset {} for {}, ratio: {:?}", w_str, app_id_str, custom_ratio);
+                                            }
+                                        } else {
+                                            // 垂直切分，应用高度预设
+                                            if let Some(h_str) = &rule.height {
+                                                let desired_ratio =
+                                                    AppState::parse_dimension_ratio(h_str, geo.h);
+                                                custom_ratio =
+                                                    Some((1.0 - desired_ratio).clamp(0.05, 0.95));
+                                                info!("-> [Layout] Applied height preset {} for {}, ratio: {:?}", h_str, app_id_str, custom_ratio);
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                        } else {
-                            SplitType::Vertical
-                        };
+                        }
 
                         // 检查 insert_at 的返回值。如果返回 false（说明目标不在树里，可能是悬浮了），则强制将新窗口与根节点合并。
-                        if !root.insert_at(&target_id, w_data.clone(), split) {
+                        if !root.insert_at(&target_id, w_data.clone(), split, custom_ratio) {
                             info!("-> [Layout] Target {:?} not found in tree (maybe floating), merging with root.", target_id);
                             // 构造新的根节点：将旧树和新窗口组合, 默认左右分割
                             let new_root = LayoutNode::Container {
                                 split_type: SplitType::Vertical,
-                                ratio: 0.5,
-                                left_child: Box::new(root), // 旧树
-                                right_child: Box::new(LayoutNode::Window(w_data)), // 新窗口
+                                ratio: custom_ratio.unwrap_or(0.5), // 兜底也用算好的比例
+                                left_child: Box::new(root),
+                                right_child: Box::new(LayoutNode::Window(w_data)),
                             };
                             state.layout_roots.insert(tree_key, new_root);
                         } else {

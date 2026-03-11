@@ -55,6 +55,7 @@ impl LayoutNode {
         target_id: &ObjectId,
         new_win: WindowData,
         split: SplitType,
+        custom_ratio: Option<f32>,
     ) -> bool {
         match self {
             LayoutNode::Window(w_data) => {
@@ -62,7 +63,7 @@ impl LayoutNode {
                     let old_win = w_data.clone();
                     *self = LayoutNode::Container {
                         split_type: split,
-                        ratio: 0.5,
+                        ratio: custom_ratio.unwrap_or(0.5),
                         left_child: Box::new(LayoutNode::Window(old_win)),
                         right_child: Box::new(LayoutNode::Window(new_win)),
                     };
@@ -75,8 +76,8 @@ impl LayoutNode {
                 right_child,
                 ..
             } => {
-                left_child.insert_at(target_id, new_win.clone(), split)
-                    || right_child.insert_at(target_id, new_win, split)
+                left_child.insert_at(target_id, new_win.clone(), split, custom_ratio)
+                    || right_child.insert_at(target_id, new_win, split, custom_ratio)
             }
         }
     }
