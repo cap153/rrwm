@@ -497,27 +497,21 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
                 // 3. 显隐控制：遍历所有窗口
                 for w_data in &state.windows {
-                    if let Some(ref app_id) = w_data.app_id {
-                        if app_id.contains("fcitx") {
-                            continue;
-                        }
-
-                        let is_visible = if let Some(win_out_id) = &w_data.output {
-                            if let Some(out_data) = state.outputs.get(win_out_id) {
-                                // 窗口所属显示器正在看这个窗口的标签
-                                (w_data.tags & out_data.tags) != 0
-                            } else {
-                                false
-                            }
+                    let is_visible = if let Some(win_out_id) = &w_data.output {
+                        if let Some(out_data) = state.outputs.get(win_out_id) {
+                            // 窗口所属显示器正在看这个窗口的标签
+                            (w_data.tags & out_data.tags) != 0
                         } else {
                             false
-                        };
-
-                        if is_visible {
-                            w_data.window.show();
-                        } else {
-                            w_data.window.hide();
                         }
+                    } else {
+                        false
+                    };
+
+                    if is_visible {
+                        w_data.window.show();
+                    } else {
+                        w_data.window.hide();
                     }
                 }
 
@@ -1064,16 +1058,6 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     out_id_to_use = w_info.output.clone();
                 }
 
-                // 2. 过滤黑名单：fcitx 或没有有效显示器则跳过
-                if let Some(ref id_str) = app_id {
-                    if id_str.contains("fcitx") {
-                        return;
-                    }
-                } else {
-                    // 如果没有 app_id，为了系统稳定，我们也先不平铺它
-                    return;
-                }
-
                 let out_id = match out_id_to_use {
                     Some(o) => o,
                     None => return, // 还没准备好显示器，先不平铺
@@ -1122,8 +1106,16 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             if let Some(rule) = rules.iter().find(|r| {
                                 app_id_str.to_lowercase().contains(&r.appid.to_lowercase())
                             }) {
-                                should_float = rule.floating.as_deref().map(|s| s.to_lowercase() == "true").unwrap_or(false);
-                                should_fullscreen = rule.fullscreen.as_deref().map(|s| s.to_lowercase() == "true").unwrap_or(false);
+                                should_float = rule
+                                    .floating
+                                    .as_deref()
+                                    .map(|s| s.to_lowercase() == "true")
+                                    .unwrap_or(false);
+                                should_fullscreen = rule
+                                    .fullscreen
+                                    .as_deref()
+                                    .map(|s| s.to_lowercase() == "true")
+                                    .unwrap_or(false);
                                 rule_width = rule.width.clone();
                                 rule_height = rule.height.clone();
 
@@ -1148,14 +1140,14 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             // 福利：悬浮窗口也支持 width/height 预设！
                             // parse_dimension_ratio 会把 "1000" 或 "25%" 转成比例，乘回屏幕尺寸就是绝对像素
                             if let Some(w_str) = &rule_width {
-                                req_w = (AppState::parse_dimension_ratio(
-                                    w_str, screen.w,
-                                ) * screen.w as f32) as i32;
+                                req_w = (AppState::parse_dimension_ratio(w_str, screen.w)
+                                    * screen.w as f32)
+                                    as i32;
                             }
                             if let Some(h_str) = &rule_height {
-                                req_h = (AppState::parse_dimension_ratio(
-                                    h_str, screen.h,
-                                ) * screen.h as f32) as i32;
+                                req_h = (AppState::parse_dimension_ratio(h_str, screen.h)
+                                    * screen.h as f32)
+                                    as i32;
                             }
 
                             new_float_geo = Some(state.calculate_floating_geometry(
@@ -1205,18 +1197,14 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                 if split == SplitType::Vertical {
                                     if let Some(w_str) = &rule_width {
                                         let desired_ratio =
-                                            AppState::parse_dimension_ratio(
-                                                w_str, geo.w,
-                                            );
+                                            AppState::parse_dimension_ratio(w_str, geo.w);
                                         custom_ratio =
                                             Some((1.0 - desired_ratio).clamp(0.05, 0.95));
                                     }
                                 } else {
                                     if let Some(h_str) = &rule_height {
                                         let desired_ratio =
-                                            AppState::parse_dimension_ratio(
-                                                h_str, geo.h,
-                                            );
+                                            AppState::parse_dimension_ratio(h_str, geo.h);
                                         custom_ratio =
                                             Some((1.0 - desired_ratio).clamp(0.05, 0.95));
                                     }
@@ -1235,7 +1223,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                 };
                                 state.layout_roots.insert(tree_key.clone(), new_root);
                             } else {
-                            // 插入成功，直接放回
+                                // 插入成功，直接放回
                                 state.layout_roots.insert(tree_key.clone(), root);
                             }
                         }
