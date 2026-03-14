@@ -1980,7 +1980,7 @@ impl AppState {
             .map(|(id, _)| id)
     }
     /// 辅助：计算悬浮窗口的智能空位坐标 (避免重叠，自适应屏幕)
-    fn calculate_floating_geometry(
+    pub fn calculate_floating_geometry(
         &self,
         win_id: &ObjectId,
         out_name: &str,

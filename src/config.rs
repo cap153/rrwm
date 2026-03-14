@@ -66,6 +66,8 @@ pub struct WindowRuleMatch {
     pub icon: String,
     pub width: Option<String>,
     pub height: Option<String>,
+    pub floating: Option<String>,
+    pub fullscreen: Option<String>,
 }
 
 // --- 定义 rule 分组 ---

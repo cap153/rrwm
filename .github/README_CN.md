@@ -158,7 +158,8 @@ border = { width = "2", color = "#bd93f9" }
 [window.rule] # 给软件配置的图标可以在tag动态展示
 match = [
 	{ appid="chromium", icon="", width="25%", height="500" }, # 平铺窗口宽/高按比例分割，单位百分比或px
-	{ appid="wechat", icon="", width="25%" },
+	{ appid="wechat", icon="", floating="true", width="800", height="50%" },
+	{ appid="mpv", icon="󰐋", fullscreen="true" },
 ]
 ```
 

@@ -1105,84 +1105,143 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     // 构造元组键：(显示器, 标签)
                     let tree_key = (out_id.clone(), current_tag);
 
-                    if !state.layout_roots.contains_key(&tree_key) {
-                        state
-                            .layout_roots
-                            .insert(tree_key, LayoutNode::Window(w_data));
-                    } else if let Some(mut root) = state.layout_roots.remove(&tree_key) {
-                        // 找到该显示器/标签下的焦点历史，决定切分位置
-                        let target_id = state
-                            .tag_focus_history
-                            .get(&tree_key)
-                            .cloned()
-                            .unwrap_or_else(|| id.clone());
+                    // --- 1. 查询并解析应用规则 ---
+                    let mut should_float = false;
+                    let mut should_fullscreen = false;
+                    let mut rule_width = None;
+                    let mut rule_height = None;
 
-                        // --- 判断方向并计算自定义比例 ---
-                        let mut split = SplitType::Vertical;
-                        let mut custom_ratio = None;
+                    if let Some(app_id_str) = &w_data.app_id {
+                        if let Some(rules) = state
+                            .config
+                            .window
+                            .as_ref()
+                            .and_then(|w| w.rule.as_ref())
+                            .and_then(|r| r.matches.as_ref())
+                        {
+                            if let Some(rule) = rules.iter().find(|r| {
+                                app_id_str.to_lowercase().contains(&r.appid.to_lowercase())
+                            }) {
+                                should_float = rule.floating.as_deref().map(|s| s.to_lowercase() == "true").unwrap_or(false);
+                                should_fullscreen = rule.fullscreen.as_deref().map(|s| s.to_lowercase() == "true").unwrap_or(false);
+                                rule_width = rule.width.clone();
+                                rule_height = rule.height.clone();
 
-                        if let Some(geo) = state.last_geometry.get(&target_id) {
-                            split = if geo.w > geo.h {
-                                SplitType::Vertical
-                            } else {
-                                SplitType::Horizontal
-                            };
-
-                            // 查询是否有宽高预设
-                            if let Some(app_id_str) = &w_data.app_id {
-                                if let Some(rules) = state
-                                    .config
-                                    .window
-                                    .as_ref()
-                                    .and_then(|w| w.rule.as_ref())
-                                    .and_then(|r| r.matches.as_ref())
-                                {
-                                    if let Some(rule) = rules.iter().find(|r| {
-                                        app_id_str.to_lowercase().contains(&r.appid.to_lowercase())
-                                    }) {
-                                        if split == SplitType::Vertical {
-                                            // 水平切分，应用宽度预设
-                                            if let Some(w_str) = &rule.width {
-                                                let desired_ratio =
-                                                    AppState::parse_dimension_ratio(w_str, geo.w);
-                                                // 新窗口是右孩子，所以要给它 1.0 - ratio
-                                                custom_ratio =
-                                                    Some((1.0 - desired_ratio).clamp(0.05, 0.95));
-                                                info!("-> [Layout] Applied width preset {} for {}, ratio: {:?}", w_str, app_id_str, custom_ratio);
-                                            }
-                                        } else {
-                                            // 垂直切分，应用高度预设
-                                            if let Some(h_str) = &rule.height {
-                                                let desired_ratio =
-                                                    AppState::parse_dimension_ratio(h_str, geo.h);
-                                                custom_ratio =
-                                                    Some((1.0 - desired_ratio).clamp(0.05, 0.95));
-                                                info!("-> [Layout] Applied height preset {} for {}, ratio: {:?}", h_str, app_id_str, custom_ratio);
-                                            }
-                                        }
-                                    }
-                                }
+                                info!(
+                                    "-> [Rule] Matched rule for {}: Float={}, Fullscreen={}",
+                                    app_id_str, should_float, should_fullscreen
+                                );
                             }
-                        }
-
-                        // 检查 insert_at 的返回值。如果返回 false（说明目标不在树里，可能是悬浮了），则强制将新窗口与根节点合并。
-                        if !root.insert_at(&target_id, w_data.clone(), split, custom_ratio) {
-                            info!("-> [Layout] Target {:?} not found in tree (maybe floating), merging with root.", target_id);
-                            // 构造新的根节点：将旧树和新窗口组合, 默认左右分割
-                            let new_root = LayoutNode::Container {
-                                split_type: SplitType::Vertical,
-                                ratio: custom_ratio.unwrap_or(0.5), // 兜底也用算好的比例
-                                left_child: Box::new(root),
-                                right_child: Box::new(LayoutNode::Window(w_data)),
-                            };
-                            state.layout_roots.insert(tree_key, new_root);
-                        } else {
-                            // 插入成功，直接放回
-                            state.layout_roots.insert(tree_key, root);
                         }
                     }
 
-                    // 4. 更新全局状态
+                    // --- 2. 如果是悬浮窗口，计算坐标并跳过平铺树 ---
+                    let mut new_float_geo = None;
+                    if should_float {
+                        if let Some(out_data) = state.outputs.get(&out_id) {
+                            let screen = out_data.usable_area;
+
+                            // 默认尺寸：60%
+                            let mut req_w = (screen.w as f32 * 0.6) as i32;
+                            let mut req_h = (screen.h as f32 * 0.6) as i32;
+
+                            // 福利：悬浮窗口也支持 width/height 预设！
+                            // parse_dimension_ratio 会把 "1000" 或 "25%" 转成比例，乘回屏幕尺寸就是绝对像素
+                            if let Some(w_str) = &rule_width {
+                                req_w = (AppState::parse_dimension_ratio(
+                                    w_str, screen.w,
+                                ) * screen.w as f32) as i32;
+                            }
+                            if let Some(h_str) = &rule_height {
+                                req_h = (AppState::parse_dimension_ratio(
+                                    h_str, screen.h,
+                                ) * screen.h as f32) as i32;
+                            }
+
+                            new_float_geo = Some(state.calculate_floating_geometry(
+                                &id,
+                                &out_id,
+                                current_tag,
+                                screen,
+                                req_w,
+                                req_h,
+                            ));
+                        }
+                    }
+
+                    // --- 3. 更新底层状态 ---
+                    if let Some(w_info) = state.windows.iter_mut().find(|w| w.id == id) {
+                        w_info.is_floating = should_float;
+                        w_info.is_fullscreen = should_fullscreen;
+                        if let Some(geo) = new_float_geo {
+                            w_info.float_geo = geo;
+                        }
+                    }
+
+                    // --- 4. 如果不是悬浮窗，才执行平铺树插入逻辑 ---
+                    if !should_float {
+                        if !state.layout_roots.contains_key(&tree_key) {
+                            state
+                                .layout_roots
+                                .insert(tree_key.clone(), LayoutNode::Window(w_data.clone()));
+                        } else if let Some(mut root) = state.layout_roots.remove(&tree_key) {
+                            let target_id = state
+                                .tag_focus_history
+                                .get(&tree_key)
+                                .cloned()
+                                .unwrap_or_else(|| id.clone());
+
+                            let mut split = SplitType::Vertical;
+                            let mut custom_ratio = None;
+
+                            if let Some(geo) = state.last_geometry.get(&target_id) {
+                                split = if geo.w > geo.h {
+                                    SplitType::Vertical
+                                } else {
+                                    SplitType::Horizontal
+                                };
+
+                                // 应用平铺树的分割比例预设
+                                if split == SplitType::Vertical {
+                                    if let Some(w_str) = &rule_width {
+                                        let desired_ratio =
+                                            AppState::parse_dimension_ratio(
+                                                w_str, geo.w,
+                                            );
+                                        custom_ratio =
+                                            Some((1.0 - desired_ratio).clamp(0.05, 0.95));
+                                    }
+                                } else {
+                                    if let Some(h_str) = &rule_height {
+                                        let desired_ratio =
+                                            AppState::parse_dimension_ratio(
+                                                h_str, geo.h,
+                                            );
+                                        custom_ratio =
+                                            Some((1.0 - desired_ratio).clamp(0.05, 0.95));
+                                    }
+                                }
+                            }
+
+                            // 检查 insert_at 的返回值。如果返回 false（说明目标不在树里，可能是悬浮了），则强制将新窗口与根节点合并。
+                            if !root.insert_at(&target_id, w_data.clone(), split, custom_ratio) {
+                                info!("-> [Layout] Target {:?} not found in tree (maybe floating), merging with root.", target_id);
+                                // 构造新的根节点：将旧树和新窗口组合, 默认左右分割
+                                let new_root = LayoutNode::Container {
+                                    split_type: SplitType::Vertical,
+                                    ratio: custom_ratio.unwrap_or(0.5),
+                                    left_child: Box::new(root),
+                                    right_child: Box::new(LayoutNode::Window(w_data.clone())),
+                                };
+                                state.layout_roots.insert(tree_key.clone(), new_root);
+                            } else {
+                            // 插入成功，直接放回
+                                state.layout_roots.insert(tree_key.clone(), root);
+                            }
+                        }
+                    }
+
+                    // --- 5. 更新全局焦点与显示器 ---
                     state.focused_window = Some(id.clone());
                     state.focused_output = Some(out_id.clone());
                     state
@@ -1192,6 +1251,8 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     if let Some(seat) = &state.main_seat {
                         seat.focus_window(proxy);
                     }
+
+                    // 必须触发一次重新排版（全屏、悬浮、比例都需要在这之后立即生效）
                     if let Some(wm) = &state.river_wm {
                         wm.manage_dirty();
                     }

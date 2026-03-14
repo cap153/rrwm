@@ -163,7 +163,8 @@ border = { width = "2", color = "#bd93f9" }
 [window.rule] # The icons configured for the software can be dynamically displayed in the tag
 match = [
 	{ appid="chromium", icon="", width="25%", height="500" }, # Tiled window width/height is divided proportionally, in percentage or pixels (px).
-	{ appid="wechat", icon="", width="25%" },
+	{ appid="wechat", icon="", floating="true", width="800", height="50%" },
+	{ appid="mpv", icon="󰐋", fullscreen="true" },
 ]
 ```
 
