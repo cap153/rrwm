@@ -111,6 +111,13 @@ fn main() {
         restrict_focus_to_floating: false,
         pending_focus_dir: None,
         is_resize_mode: false,
+        pointer_bindings: Vec::new(),
+        pointer_op_mode: crate::wm::PointerOpMode::None,
+        pointer_op_target: None,
+        pointer_op_initial_geo: None,
+        pointer_op_edges: 0,
+        pending_op_start: false,
+        pending_op_end: false,
     };
 
     let _registry = display.get_registry(&qh, ());

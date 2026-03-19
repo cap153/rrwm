@@ -1,6 +1,6 @@
 use crate::protocol::river_wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocol::river_xkb::river_xkb_bindings_v1::RiverXkbBindingsV1;
-use crate::wm::{actions::Action, AppState, KeyBinding,BindingMode};
+use crate::wm::{actions::Action, AppState, BindingMode, KeyBinding, PointerBinding};
 use tracing::{error, info, warn};
 use wayland_client::QueueHandle;
 use xkbcommon::xkb;
@@ -134,6 +134,114 @@ fn process_entry(
     }
 }
 
+/// 辅助：将鼠标按键名称转为 Linux input event code
+fn parse_pointer_button(name: &str) -> Option<u32> {
+    match name.to_uppercase().as_str() {
+        "BTN_LEFT" | "272" => Some(272),
+        "BTN_RIGHT" | "273" => Some(273),
+        "BTN_MIDDLE" | "274" => Some(274),
+        "BTN_SIDE" | "275" => Some(275),
+        "BTN_EXTRA" | "276" => Some(276),
+        _ => name.parse::<u32>().ok(), // 允许用户直接写数字，例如 "272"
+    }
+}
+
+/// 辅助：真正向 River 注册鼠标绑定并存入 state
+fn commit_pointer_binding(
+    state: &mut AppState,
+    _mgr: &RiverXkbBindingsV1,
+    seat: &RiverSeatV1,
+    qh: &QueueHandle<AppState>,
+    button_name: &str,
+    mods: Modifiers,
+    actions: Vec<Action>,
+    mode: BindingMode,
+) {
+    let button_code = match parse_pointer_button(button_name) {
+        Some(code) => code,
+        None => {
+            error!("-> [Pointer Binding Error] Unknown button name: {}", button_name);
+            return;
+        }
+    };
+
+    // --- 【核心修复】 ---
+    // 调用 River 协议注册鼠标指针事件
+    // 注意：get_pointer_binding 是 RiverSeatV1 的方法，不是 XkbBindings 的方法！
+    let binding_obj = seat.get_pointer_binding(button_code, mods, qh, ());
+
+    state.pointer_bindings.push(PointerBinding {
+        obj: binding_obj,
+        actions,
+        mode,
+    });
+}
+
+/// 核心：递归解析鼠标配置的 TOML 结构
+fn process_pointer_entry(
+    state: &mut AppState,
+    mgr: &RiverXkbBindingsV1,
+    seat: &RiverSeatV1,
+    qh: &QueueHandle<AppState>,
+    btn_or_mod: &str,
+    current_mods: Modifiers,
+    entry: &crate::config::KeyBindingEntry,
+    mode: BindingMode,
+) {
+    match entry {
+        crate::config::KeyBindingEntry::Action(cfg) => {
+            let actions = vec![Action::from_config(
+                &cfg.action,
+                &cfg.args,
+                &cfg.cmd,
+                &cfg.unit,
+            )];
+            commit_pointer_binding(
+                state,
+                mgr,
+                seat,
+                qh,
+                btn_or_mod,
+                current_mods,
+                actions,
+                mode,
+            );
+        }
+        crate::config::KeyBindingEntry::List(cfgs) => {
+            let actions = cfgs
+                .iter()
+                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit))
+                .collect();
+            commit_pointer_binding(
+                state,
+                mgr,
+                seat,
+                qh,
+                btn_or_mod,
+                current_mods,
+                actions,
+                mode,
+            );
+        }
+        crate::config::KeyBindingEntry::Group(sub_map) => {
+            let extra_mods = parse_mod_group(btn_or_mod);
+            let combined_mods = current_mods | extra_mods;
+            for (sub_key, sub_entry) in sub_map {
+                process_pointer_entry(
+                    state,
+                    mgr,
+                    seat,
+                    qh,
+                    sub_key,
+                    combined_mods,
+                    sub_entry,
+                    mode,
+                );
+            }
+        }
+    }
+}
+
 pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
     let seat = match &state.main_seat {
         Some(s) => s.clone(),
@@ -190,6 +298,22 @@ pub fn setup_keybindings(state: &mut AppState, qh: &QueueHandle<AppState>) {
                 Modifiers::empty(),
                 entry,
                 BindingMode::Resize,
+            );
+        }
+    }
+    // --- 新增加载 Pointer 鼠标绑定 ---
+    if let Some(entries) = state.config.pointer.clone() {
+        info!("-> Registering [Pointer] bindings...");
+        for (key_or_mod, entry) in &entries {
+            process_pointer_entry(
+                state,
+                &xkb_mgr,
+                &seat,
+                qh,
+                key_or_mod,
+                Modifiers::empty(),
+                entry,
+                BindingMode::Normal, // 目前鼠标绑定默认都在 Normal 模式下工作
             );
         }
     }

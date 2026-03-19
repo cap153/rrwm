@@ -15,6 +15,9 @@ use crate::protocol::river_layer_shell::river_layer_shell_seat_v1::{
 };
 use crate::protocol::river_layer_shell::river_layer_shell_v1::RiverLayerShellV1;
 use crate::protocol::river_wm::river_output_v1::Event as OutEvent;
+use crate::protocol::river_wm::river_pointer_binding_v1::{
+    Event as PointerBindingEvent, RiverPointerBindingV1,
+};
 use crate::protocol::river_wm::river_seat_v1::Event as SeatEvent;
 use crate::protocol::river_wm::{
     river_node_v1::RiverNodeV1, river_output_v1::RiverOutputV1, river_seat_v1::RiverSeatV1,
@@ -62,6 +65,19 @@ pub struct KeyBinding {
     pub obj: RiverXkbBindingV1,
     pub actions: Vec<Action>,
     pub mode: BindingMode,
+}
+
+pub struct PointerBinding {
+    pub obj: RiverPointerBindingV1,
+    pub actions: Vec<Action>,
+    pub mode: BindingMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PointerOpMode {
+    None,
+    Move,
+    Resize,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +167,13 @@ pub struct AppState {
     pub restrict_focus_to_floating: bool,
     pub pending_focus_dir: Option<Direction>,
     pub is_resize_mode: bool,
+    pub pointer_bindings: Vec<PointerBinding>,
+    pub pointer_op_mode: PointerOpMode,
+    pub pointer_op_target: Option<wayland_backend::client::ObjectId>,
+    pub pointer_op_initial_geo: Option<crate::wm::layout::Geometry>,
+    pub pointer_op_edges: u32,
+    pub pending_op_start: bool,
+    pub pending_op_end: bool,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -254,6 +277,40 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 // 1. 基础工作：处理 IPC 和广播状态
                 state.handle_ipc_connections(); // 处理 Waybar 连接
                 state.broadcast_status();
+
+                // --- 【执行排队的指针操作】 ---
+                if state.pending_op_start {
+                    if let Some(seat) = &state.main_seat {
+                        seat.op_start_pointer();
+                    }
+                    if state.pointer_op_mode == PointerOpMode::Resize {
+                        if let Some(id) = &state.pointer_op_target {
+                            if let Some(w) = state.windows.iter().find(|w| w.id == *id) {
+                                w.window.inform_resize_start();
+                            }
+                        }
+                    }
+                    state.pending_op_start = false;
+                }
+
+                if state.pending_op_end {
+                    if let Some(seat) = &state.main_seat {
+                        seat.op_end();
+                    }
+                    if state.pointer_op_mode == PointerOpMode::Resize {
+                        if let Some(target_id) = &state.pointer_op_target {
+                            if let Some(w) = state.windows.iter().find(|w| w.id == *target_id) {
+                                w.window.inform_resize_end();
+                            }
+                        }
+                    }
+                    // 操作结束，清空状态机记忆
+                    state.pointer_op_mode = PointerOpMode::None;
+                    state.pointer_op_target = None;
+                    state.pointer_op_initial_geo = None;
+                    state.pending_op_end = false;
+                }
+                // ----------------------------------------
 
                 // --- 物理焦点生效逻辑 ---
                 if let Some((x, y)) = state.pending_pointer_warp.take() {
@@ -744,6 +801,15 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         (false, BindingMode::Normal) => kb.obj.enable(),
                     }
                 }
+                // --- 【鼠标模式切换】 ---
+                for pb in &state.pointer_bindings {
+                    match (state.is_resize_mode, pb.mode) {
+                        (true, BindingMode::Resize) => pb.obj.enable(),
+                        (true, BindingMode::Normal) => pb.obj.disable(),
+                        (false, BindingMode::Resize) => pb.obj.disable(),
+                        (false, BindingMode::Normal) => pb.obj.enable(),
+                    }
+                }
                 // 7. 后续清理：Waybar 激活与快捷键使能
                 if let Some(focused_name) = &state.focused_output {
                     if let Some(out_data) = state.outputs.get(focused_name) {
@@ -923,7 +989,7 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
 impl Dispatch<RiverSeatV1, ()> for AppState {
     fn event(
         state: &mut Self,
-        proxy: &RiverSeatV1,
+        _proxy: &RiverSeatV1,
         event: SeatEvent,
         _: &(),
         _: &Connection,
@@ -968,7 +1034,69 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                             .insert((out_id.clone(), w_info.tags), id.clone());
                     }
                 }
-                proxy.focus_window(&window);
+            }
+            // --- 处理拖拽位移 ---
+            SeatEvent::OpDelta { dx, dy } => {
+                let target_id = match &state.pointer_op_target {
+                    Some(id) => id.clone(),
+                    None => return,
+                };
+                let initial_geo = match &state.pointer_op_initial_geo {
+                    Some(geo) => *geo,
+                    None => return,
+                };
+
+                if let Some(w) = state.windows.iter_mut().find(|w| w.id == target_id) {
+                    if state.pointer_op_mode == PointerOpMode::Move {
+                        // 移动：永远相对于最初按下的位置累加，绝不产生误差！
+                        w.float_geo.x = initial_geo.x + dx;
+                        w.float_geo.y = initial_geo.y + dy;
+                    } else if state.pointer_op_mode == PointerOpMode::Resize {
+                        // 调整大小：使用强大的边缘拉伸数学
+                        use crate::protocol::river_wm::river_window_v1::Edges;
+                        let edges = Edges::from_bits_truncate(state.pointer_op_edges);
+                        let mut new_geo = initial_geo;
+
+                        // 左右拉伸
+                        if edges.contains(Edges::Right) {
+                            new_geo.w = (initial_geo.w + dx).max(50);
+                        } else if edges.contains(Edges::Left) {
+                            new_geo.w = (initial_geo.w - dx).max(50);
+                            new_geo.x = initial_geo.x + (initial_geo.w - new_geo.w);
+                            // X要跟着左移
+                        }
+
+                        // 上下拉伸
+                        if edges.contains(Edges::Bottom) {
+                            new_geo.h = (initial_geo.h + dy).max(50);
+                        } else if edges.contains(Edges::Top) {
+                            new_geo.h = (initial_geo.h - dy).max(50);
+                            new_geo.y = initial_geo.y + (initial_geo.h - new_geo.h);
+                            // Y要跟着上移
+                        }
+
+                        w.float_geo = new_geo;
+                    }
+                }
+            }
+
+            // --- 处理松开鼠标 ---
+            SeatEvent::OpRelease => {
+                info!("->[Pointer] Seat OpRelease received, queueing op_end");
+                state.pending_op_end = true;
+                // 如果是 Resize，要通知应用结束
+                if state.pointer_op_mode == PointerOpMode::Resize {
+                    if let Some(target_id) = &state.pointer_op_target {
+                        if let Some(w) = state.windows.iter().find(|w| w.id == *target_id) {
+                            w.window.inform_resize_end();
+                        }
+                    }
+                }
+                // 清空状态机
+                state.pointer_op_mode = PointerOpMode::None;
+                state.pointer_op_target = None;
+                state.pointer_op_initial_geo = None;
+                info!("-> [Pointer] Operation Ended");
             }
             _ => (),
         }
@@ -1325,6 +1453,32 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     }
                 }
             }
+            // --- 应用主动请求拖拽 ---
+            WinEvent::PointerMoveRequested { seat: _ } => {
+                let id = proxy.id();
+                if let Some(w) = state.windows.iter().find(|w| w.id == id) {
+                    if w.is_floating && !w.is_fullscreen {
+                        state.pointer_op_mode = PointerOpMode::Move;
+                        state.pointer_op_target = Some(id.clone());
+                        state.pointer_op_initial_geo = Some(w.float_geo);
+                        state.pending_op_start = true;
+                    }
+                }
+            }
+
+            // --- 应用主动请求调大小 ---
+            WinEvent::PointerResizeRequested { seat: _, edges } => {
+                let id = proxy.id();
+                if let Some(w) = state.windows.iter().find(|w| w.id == id) {
+                    if w.is_floating && !w.is_fullscreen {
+                        state.pointer_op_mode = PointerOpMode::Resize;
+                        state.pointer_op_target = Some(id.clone());
+                        state.pointer_op_initial_geo = Some(w.float_geo);
+                        state.pointer_op_edges = edges.into();
+                        state.pending_op_start = true;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1458,6 +1612,40 @@ impl Dispatch<RiverXkbConfigV1, ()> for AppState {
         }
     }
     wayland_client::event_created_child!(AppState, RiverXkbConfigV1, [1 => (RiverXkbKeyboardV1, ())]);
+}
+
+// --- 处理鼠标按键事件 ---
+impl Dispatch<RiverPointerBindingV1, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &RiverPointerBindingV1,
+        event: PointerBindingEvent,
+        _: &(),
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            PointerBindingEvent::Pressed => {
+                // 1. 查找是哪个鼠标绑定触发了
+                let actions_to_run = state
+                    .pointer_bindings
+                    .iter()
+                    .find(|b| b.obj.id() == proxy.id())
+                    .map(|b| b.actions.clone());
+
+                // 2. 执行对应的动作 (比如 MoveInteractive)
+                if let Some(actions) = actions_to_run {
+                    for action in actions {
+                        state.perform_action(action.clone());
+                    }
+                }
+            }
+            PointerBindingEvent::Released => {
+                info!("->[Pointer] OpRelease received, queueing op_end");
+                state.pending_op_end = true;
+            }
+        }
+    }
 }
 
 impl Dispatch<RiverXkbKeymapV1, ()> for AppState {

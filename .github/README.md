@@ -6,6 +6,7 @@
 
 * [river](https://codeberg.org/river/river) 0.4.0
 * `wev` (Optional: used to query XKB names for specific keys)
+* `libinput-tools` (Optional: used `libinput events` to query standard Names for Mouse Buttons)
 * `wlr-randr` (Optional: used to retrieve hardware information for monitors)
 
 # Installation

@@ -51,6 +51,8 @@ pub enum Action {
     ExitResizeMode,
     Resize(ResizeAxis, i32),  // 轴向, 增量(像素)
     MoveStep(Direction, i32), // 方向, 步进(像素) - 用于 Resize 模式下的移动
+    MoveInteractive,
+    ResizeInteractive,
 }
 
 impl Action {
@@ -84,6 +86,10 @@ impl Action {
             // --- Resize 模式控制 ---
             "toggle_resize_mode" => Action::ToggleResizeMode,
             "exit_resize_mode" => Action::ExitResizeMode,
+
+            // --- 解析交互式动作 ---
+            "move_interactive" => Action::MoveInteractive,
+            "resize_interactive" => Action::ResizeInteractive,
 
             // --- 尺寸调整指令 ---
             "shrink_width" => Action::Resize(ResizeAxis::Horizontal, -step),
@@ -503,9 +509,6 @@ impl AppState {
                     // 内部切换
                     let target = candidates[cur_idx - 1];
                     self.focused_window = Some(target.id.clone());
-                    if let Some(seat) = &self.main_seat {
-                        seat.focus_window(&target.window);
-                    }
                 } else {
                     // 撞左墙 -> 跨 Tag 穿透
                     self.restrict_focus_to_floating = true; // 标记：我要找悬浮窗
@@ -517,9 +520,6 @@ impl AppState {
                 if cur_idx < candidates.len() - 1 {
                     let target = candidates[cur_idx + 1];
                     self.focused_window = Some(target.id.clone());
-                    if let Some(seat) = &self.main_seat {
-                        seat.focus_window(&target.window);
-                    }
                 } else {
                     // 撞右墙 -> 跨 Tag 穿透
                     self.restrict_focus_to_floating = true;
@@ -535,9 +535,6 @@ impl AppState {
                     candidates[cur_idx - 1]
                 };
                 self.focused_window = Some(target.id.clone());
-                if let Some(seat) = &self.main_seat {
-                    seat.focus_window(&target.window);
-                }
             }
             Direction::Down => {
                 let target = if cur_idx == candidates.len() - 1 {
@@ -546,9 +543,6 @@ impl AppState {
                     candidates[cur_idx + 1]
                 };
                 self.focused_window = Some(target.id.clone());
-                if let Some(seat) = &self.main_seat {
-                    seat.focus_window(&target.window);
-                }
             }
         }
 
@@ -1010,6 +1004,37 @@ impl AppState {
                     }
                 }
             }
+
+            // --- 交互式拖拽动作执行（占位，等待状态机接入） ---
+            Action::MoveInteractive => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                        // 只有悬浮窗口允许自由拖拽
+                        if w.is_floating && !w.is_fullscreen {
+                            info!("->[Pointer] Queueing interactive MOVE");
+                            self.pointer_op_mode = crate::wm::PointerOpMode::Move;
+                            self.pointer_op_target = Some(f_id.clone());
+                            self.pointer_op_initial_geo = Some(w.float_geo);
+                            self.pending_op_start = true;
+                        }
+                    }
+                }
+            }
+            Action::ResizeInteractive => {
+                if let Some(f_id) = self.focused_window.clone() {
+                    if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                        if w.is_floating && !w.is_fullscreen {
+                            info!("-> [Pointer] Queueing interactive RESIZE");
+                            self.pointer_op_mode = crate::wm::PointerOpMode::Resize;
+                            self.pointer_op_target = Some(f_id.clone());
+                            self.pointer_op_initial_geo = Some(w.float_geo);
+                            self.pointer_op_edges = 10; // Bottom(2) | Right(8)
+                            self.pending_op_start = true;
+                        }
+                    }
+                }
+            }
+
             // --- 切换悬浮状态 ---
             Action::ToggleFloat => {
                 if let Some(f_id) = self.focused_window.clone() {
@@ -1130,15 +1155,6 @@ impl AppState {
                                 f_id, target_id
                             );
                             self.focused_window = Some(target_id.clone());
-
-                            // 别忘了告诉 Seat
-                            if let Some(seat) = &self.main_seat {
-                                if let Some(w_data) =
-                                    self.windows.iter().find(|w| w.id == target_id)
-                                {
-                                    seat.focus_window(&w_data.window);
-                                }
-                            }
 
                             if let Some(wm) = &self.river_wm {
                                 wm.manage_dirty();

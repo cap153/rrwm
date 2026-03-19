@@ -4,6 +4,7 @@
 
 * [river](https://codeberg.org/river/river) 0.4.0
 * wev (可选，查询特定的按键对应的XKB名称)
+* libinput-tools (可选：使用 `libinput events` 查询鼠标按键的标准名称。)
 * wlr-randr (可选，用于获取显示器的硬件信息)
 
 # 安装

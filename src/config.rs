@@ -120,6 +120,7 @@ pub enum KeyBindingEntry {
 pub struct Config {
     pub input: Option<InputConfig>,
     pub keybindings: Option<HashMap<String, KeyBindingEntry>>,
+    pub pointer: Option<HashMap<String, KeyBindingEntry>>,
     pub resize: Option<HashMap<String, KeyBindingEntry>>,
     pub waybar: Option<WaybarConfig>,
     pub output: Option<HashMap<String, OutputConfig>>,
@@ -165,6 +166,7 @@ impl Config {
             input: None,
             keybindings: None,
             resize: None,
+            pointer: None,
             waybar: None,
             output: None,
             window: None,
