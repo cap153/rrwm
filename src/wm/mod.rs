@@ -1450,7 +1450,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             let dh = (height as i32 - expected_h).abs();
 
                             if dw > 2 || dh > 2 {
-                                if w.layout_retry_count < 50 {
+                                if w.layout_retry_count < 3 {
                                     w.layout_retry_count += 1;
                                     if let Some(wm) = &state.river_wm {
                                         wm.manage_dirty();
@@ -1480,7 +1480,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             let dh = (height as i32 - w.float_geo.h).abs();
 
                             if dw > 2 || dh > 2 {
-                                if w.layout_retry_count < 50 {
+                                if w.layout_retry_count < 3 {
                                     w.layout_retry_count += 1;
                                     if let Some(wm) = &state.river_wm {
                                         wm.manage_dirty();
@@ -1506,7 +1506,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             let dh = (height as i32 - geo.h).abs();
 
                             if dw > 2 || dh > 2 {
-                                if w.layout_retry_count < 50 {
+                                if w.layout_retry_count < 3 {
                                     w.layout_retry_count += 1;
                                     if let Some(wm) = &state.river_wm {
                                         wm.manage_dirty();
