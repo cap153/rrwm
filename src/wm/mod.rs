@@ -100,6 +100,7 @@ pub struct WindowData {
     pub app_id: Option<String>,
     pub output: Option<String>,
     pub is_fullscreen: bool,
+    pub is_fullscreen_applied: bool,
     pub layout_retry_count: u8,
     pub last_proposed_w: i32,
     pub last_proposed_h: i32,
@@ -263,6 +264,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     app_id: None,
                     output: current_out,
                     is_fullscreen: false,
+                    is_fullscreen_applied: false,
                     layout_retry_count: 0,
                     last_proposed_w: 0,
                     last_proposed_h: 0,
@@ -541,17 +543,36 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 }
                             }
                         }
+
+                        // --- 【兜底显示器，防闪退】 ---
+                        if target_river_output.is_none() {
+                            target_river_output =
+                                state.active_river_outputs.first().map(|i| i.obj.clone());
+                        }
+
                         if let Some(out_obj) = target_river_output {
-                            w.window.fullscreen(&out_obj);
-                            w.window.inform_fullscreen();
+                            // 如果处于尺寸纠正重试期，我们通过 退出/进入 全屏，强制 Wayland 重新下发缩放参数
+                            if w.layout_retry_count > 0 && w.layout_retry_count % 2 != 0 {
+                                w.window.exit_fullscreen();
+                                w.window.inform_not_fullscreen();
+                                w.is_fullscreen_applied = false;
+                            } else if !w.is_fullscreen_applied {
+                                w.window.fullscreen(&out_obj);
+                                w.window.inform_fullscreen();
+                                w.is_fullscreen_applied = true;
+                                w.last_proposed_w = 0;
+                                w.last_proposed_h = 0;
+                            }
+                        }
+                    } else {
+                        // 正常退出全屏
+                        if w.is_fullscreen_applied {
+                            w.window.exit_fullscreen();
+                            w.window.inform_not_fullscreen();
+                            w.is_fullscreen_applied = false;
                             w.last_proposed_w = 0;
                             w.last_proposed_h = 0;
                         }
-                    } else {
-                        w.window.exit_fullscreen();
-                        w.window.inform_not_fullscreen();
-                        w.last_proposed_w = 0;
-                        w.last_proposed_h = 0;
                     }
                 }
                 // 3. 显隐控制：遍历所有窗口
@@ -748,14 +769,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let (br, bg, bb, ba) = Self::parse_color(target_color_str);
 
                 for w_data in state.windows.iter_mut() {
-                    if w_data.is_floating && !w_data.is_fullscreen && !w_data.is_minimized {
+                    if w_data.is_floating && !w_data.is_minimized {
                         // 1. 设置尺寸
                         // 悬浮窗口的尺寸存储在 float_geo 中 (由 Actions 初始化或 Dimensions 更新)
                         let target_w = w_data.float_geo.w;
                         let target_h = w_data.float_geo.h;
 
                         // 避免重复发送 (Last Proposed Check)
-                        if w_data.last_proposed_w != target_w || w_data.last_proposed_h != target_h
+                        if w_data.last_proposed_w != target_w || w_data.last_proposed_h != target_h || w_data.layout_retry_count > 0
                         {
                             w_data.window.propose_dimensions(target_w, target_h);
                             w_data.last_proposed_w = target_w;
@@ -884,7 +905,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
                 // 2. 渲染悬浮层 (Floating Layer)
                 for w_data in &mut state.windows {
-                    if w_data.is_floating && !w_data.is_fullscreen {
+                    if w_data.is_floating && !w_data.is_minimized {
                         if w_data.node.is_none() {
                             w_data.node = Some(w_data.window.get_node(qh, ()));
                         }
@@ -1411,46 +1432,90 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 if let Some(w_idx) = state.windows.iter().position(|w| w.id == proxy.id()) {
                     let w = &mut state.windows[w_idx];
 
-                    // --- 全屏窗口：由 Compositor 接管，忽略 ---
+                    // --- 1. 全屏窗口处理 ---
                     if w.is_fullscreen {
+                        // 找出它所在显示器的真实全屏尺寸
+                        let mut expected_w = 0;
+                        let mut expected_h = 0;
+                        if let Some(out_name) = &w.output {
+                            if let Some(out_data) = state.outputs.get(out_name) {
+                                expected_w = out_data.full_area.w;
+                                expected_h = out_data.full_area.h;
+                            }
+                        }
+
+                        // 如果全屏窗口由于缩放 Bug 报出了错误尺寸，强制触发焦点脉冲唤醒它
+                        if expected_w > 0 && expected_h > 0 {
+                            let dw = (width as i32 - expected_w).abs();
+                            let dh = (height as i32 - expected_h).abs();
+
+                            if dw > 2 || dh > 2 {
+                                if w.layout_retry_count < 50 {
+                                    w.layout_retry_count += 1;
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
+                                }
+                            } else {
+                                w.layout_retry_count = 0; // 尺寸正常，解除警报
+                            }
+                        }
                         return;
                     }
 
-                    // --- 悬浮窗口: 如果应用报告了新尺寸（比如视频分辨率变了，或者未来实现了拖拽调整）更新内存中的记录 ---
+                    // --- 2. 悬浮窗口处理 ---
                     if w.is_floating {
-                        w.float_geo.w = width as i32;
-                        w.float_geo.h = height as i32;
+                        // 判定是否处于交互式调整大小状态 (WM 强权或 CSD 请求)
+                        let is_resizing = state.pointer_op_mode == PointerOpMode::Resize
+                            && state.pointer_op_target.as_ref() == Some(&w.id);
+
+                        if is_resizing {
+                            // 正在被手动调整大小，绝对信任客户端汇报的尺寸，更新底账
+                            w.float_geo.w = width as i32;
+                            w.float_geo.h = height as i32;
+                            w.layout_retry_count = 0;
+                        } else {
+                            // 没人动它，它却自己变了尺寸（通常是刚启动时不听话），强行纠正它
+                            let dw = (width as i32 - w.float_geo.w).abs();
+                            let dh = (height as i32 - w.float_geo.h).abs();
+
+                            if dw > 2 || dh > 2 {
+                                if w.layout_retry_count < 50 {
+                                    w.layout_retry_count += 1;
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
+                                } else if w.layout_retry_count == 50 {
+                                    // 放弃治疗：如果电击了 50 次它还坚持自己的尺寸，
+                                    // 妥协接受它的尺寸，防止死循环烧毁 CPU
+                                    w.float_geo.w = width as i32;
+                                    w.float_geo.h = height as i32;
+                                    w.layout_retry_count += 1;
+                                }
+                            } else {
+                                w.layout_retry_count = 0;
+                            }
+                        }
                         return;
                     }
 
-                    // 既不是全屏也不是悬浮窗口，强制平铺
-                    if !w.is_fullscreen {
+                    // --- 3. 平铺窗口处理 (原有逻辑) ---
+                    if !w.is_fullscreen && !w.is_floating {
                         if let Some(geo) = state.last_geometry.get(&proxy.id()) {
                             let dw = (width as i32 - geo.w).abs();
                             let dh = (height as i32 - geo.h).abs();
 
-                            // 误差检测
                             if dw > 2 || dh > 2 {
-                                // --- 修改点 1: 增加重试次数到 50 ---
                                 if w.layout_retry_count < 50 {
-                                    info!(
-                                        "-> Window {:?} size mismatch (Got {}x{}, Expected {}x{}), forcing relayout (Retry {}/50)...",
-                                        proxy.id(), width, height, geo.w, geo.h, w.layout_retry_count + 1
-                                    );
                                     w.layout_retry_count += 1;
-
                                     if let Some(wm) = &state.river_wm {
                                         wm.manage_dirty();
                                     }
-                                } else {
-                                    // 只有到了 50 次（大约持续半秒到一秒的疯狂抗拒）才放弃
-                                    if w.layout_retry_count == 50 {
-                                        warn!("-> Window {:?} refuses to accept layout geometry, giving up enforcement.", proxy.id());
-                                        w.layout_retry_count += 1;
-                                    }
+                                } else if w.layout_retry_count == 50 {
+                                    warn!("-> Window {:?} refuses to accept layout geometry, giving up enforcement.", proxy.id());
+                                    w.layout_retry_count += 1;
                                 }
                             } else {
-                                // 尺寸符合预期，重置计数器
                                 w.layout_retry_count = 0;
                             }
                         }
