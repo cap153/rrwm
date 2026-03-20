@@ -105,6 +105,7 @@ pub struct WindowData {
     pub last_proposed_h: i32,
     pub is_floating: bool,
     pub float_geo: Geometry,
+    pub is_minimized: bool,
 }
 
 pub struct ModeInfo {
@@ -174,6 +175,7 @@ pub struct AppState {
     pub pointer_op_edges: u32,
     pub pending_op_start: bool,
     pub pending_op_end: bool,
+    pub minimized_slots: HashMap<String, wayland_backend::client::ObjectId>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -271,6 +273,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         w: 0,
                         h: 0,
                     },
+                    is_minimized: false,
                 });
             }
             WmEvent::ManageStart => {
@@ -350,6 +353,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 if needs_restore {
                     let mut candidate = None;
 
+                    // --- 【优先级 0：全屏霸权】 ---
                     // 如果当前 Tag 有全屏窗口，无视任何 restrict 标记，无视历史，强制聚焦全屏窗口
                     if let Some(out_id) = &state.focused_output {
                         candidate = state
@@ -359,106 +363,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 w.output.as_ref() == Some(out_id)
                                     && (w.tags & state.focused_tags) != 0
                                     && w.is_fullscreen
+                                    && !w.is_minimized // 防御：不聚焦被关在小黑屋的全屏窗
                             })
                             .map(|w| w.id.clone());
                     }
 
-                    if state.restrict_focus_to_floating {
-                        // ======= 策略 A: 悬浮优先 (用于：关闭悬浮窗、悬浮层穿透) =======
+                    // --- 【优先级 1：根据标记分流】 ---
+                    // 注意：只有在没找到全屏窗口时，才执行策略 A 或 B
+                    if candidate.is_none() {
+                        if state.restrict_focus_to_floating {
+                            // ======= 策略 A: 悬浮优先 (用于：关闭悬浮窗、悬浮层穿透) =======
 
-                        // 1. 历史恢复 (仅限悬浮)
-                        if let Some(out_id) = &state.focused_output {
-                            if let Some(hid) = state
-                                .tag_focus_history
-                                .get(&(out_id.clone(), state.focused_tags))
-                            {
-                                if let Some(_w) =
-                                    state.windows.iter().find(|w| w.id == *hid && w.is_floating)
-                                {
-                                    candidate = Some(hid.clone());
-                                }
-                            }
-                        }
-                        // 2. 找当前 Tag 的任意悬浮窗 (如果有关闭窗口的方向，按方向找；否则找第一个)
-                        if candidate.is_none() {
-                            let floats: Vec<&WindowData> = state
-                                .windows
-                                .iter()
-                                .filter(|w| {
-                                    (w.tags & state.focused_tags) != 0
-                                        && w.is_floating
-                                        && !w.is_fullscreen
-                                        && w.output.as_deref() == state.focused_output.as_deref()
-                                })
-                                .collect();
-                            if !floats.is_empty() {
-                                let target = match state.pending_focus_dir {
-                                    Some(Direction::Left) => {
-                                        floats.iter().max_by_key(|w| w.float_geo.x).copied()
-                                    }
-                                    Some(Direction::Right) => {
-                                        floats.iter().min_by_key(|w| w.float_geo.x).copied()
-                                    }
-                                    // --- 没有方向时（关闭窗口时），抓第一个悬浮窗 ---
-                                    _ => floats.first().copied(),
-                                };
-                                candidate = target.map(|w| w.id.clone());
-                            }
-                        }
-                        // 3. 悬浮层彻底空了，找平铺窗保底
-                        if candidate.is_none() {
-                            candidate = state
-                                .windows
-                                .iter()
-                                .find(|w| {
-                                    (w.tags & state.focused_tags) != 0
-                                        && !w.is_floating
-                                        && w.output.as_deref() == state.focused_output.as_deref()
-                                })
-                                .map(|w| w.id.clone());
-                        }
-                    } else {
-                        // ======= 策略 B: 平铺优先 (用于：关闭平铺窗、平铺层穿透) =======
-
-                        // --- 【核心修复：优先响应方向意图 (Edge Search)】 ---
-                        // 如果有方向意图（说明是跨 Tag 切过来的），优先找该方向的边缘窗口，无视历史
-                        if candidate.is_none() {
-                            if let Some(dir) = state.pending_focus_dir {
-                                if let Some(out_id) = &state.focused_output {
-                                    let tree_key = (out_id.clone(), state.focused_tags);
-                                    // 从 BSP 树中查找物理边缘
-                                    if let Some(root) = state.layout_roots.get(&tree_key) {
-                                        let look_dir = match dir {
-                                            // 向左切入 -> 找最右边
-                                            crate::wm::layout::Direction::Left => {
-                                                Some(crate::wm::layout::Direction::Right)
-                                            }
-                                            // 向右切入 -> 找最左边
-                                            crate::wm::layout::Direction::Right => {
-                                                Some(crate::wm::layout::Direction::Left)
-                                            }
-                                            // 上下方向通常不做跨 Tag 边缘定位，保持 None 即可
-                                            _ => None,
-                                        };
-
-                                        if let Some(d) = look_dir {
-                                            let edge_id = Self::find_edge_in_tree(root, d);
-                                            // 校验一下这个 ID 是否还在 windows 列表中且是平铺
-                                            if let Some(_w) = state
-                                                .windows
-                                                .iter()
-                                                .find(|w| w.id == edge_id && !w.is_floating)
-                                            {
-                                                candidate = Some(edge_id);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 1. 历史恢复 (仅限平铺) - 降级为第二优先级
-                        if candidate.is_none() {
+                            // 1. 历史恢复 (仅限悬浮)
                             if let Some(out_id) = &state.focused_output {
                                 if let Some(hid) = state
                                     .tag_focus_history
@@ -467,50 +383,136 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     if let Some(_w) = state
                                         .windows
                                         .iter()
-                                        .find(|w| w.id == *hid && !w.is_floating)
+                                        .find(|w| w.id == *hid && w.is_floating && !w.is_minimized)
                                     {
                                         candidate = Some(hid.clone());
                                     }
                                 }
                             }
-                        }
+                            // 2. 找当前 Tag 的任意悬浮窗 (如果有关闭窗口的方向，按方向找；否则找第一个)
+                            if candidate.is_none() {
+                                let floats: Vec<&WindowData> = state
+                                    .windows
+                                    .iter()
+                                    .filter(|w| {
+                                        (w.tags & state.focused_tags) != 0
+                                            && w.is_floating
+                                            && !w.is_fullscreen
+                                            && !w.is_minimized // 幽灵防御
+                                            && w.output.as_deref() == state.focused_output.as_deref()
+                                    })
+                                    .collect();
+                                if !floats.is_empty() {
+                                    let target = match state.pending_focus_dir {
+                                        Some(Direction::Left) => {
+                                            floats.iter().max_by_key(|w| w.float_geo.x).copied()
+                                        }
+                                        Some(Direction::Right) => {
+                                            floats.iter().min_by_key(|w| w.float_geo.x).copied()
+                                        }
+                                        _ => floats.first().copied(),
+                                    };
+                                    candidate = target.map(|w| w.id.clone());
+                                }
+                            }
+                            // 3. 悬浮层彻底空了，找平铺窗保底
+                            if candidate.is_none() {
+                                candidate = state
+                                    .windows
+                                    .iter()
+                                    .find(|w| {
+                                        (w.tags & state.focused_tags) != 0
+                                            && !w.is_floating
+                                            && !w.is_minimized // 幽灵防御
+                                            && w.output.as_deref() == state.focused_output.as_deref()
+                                    })
+                                    .map(|w| w.id.clone());
+                            }
+                        } else {
+                            // ======= 策略 B: 平铺优先 (用于：关闭平铺窗、平铺层穿透) =======
 
-                        // 2. 找当前 Tag 的任意平铺窗 (保底)
-                        if candidate.is_none() {
-                            candidate = state
-                                .windows
-                                .iter()
-                                .find(|w| {
-                                    (w.tags & state.focused_tags) != 0
-                                        && !w.is_floating
-                                        && w.output.as_deref() == state.focused_output.as_deref()
-                                })
-                                .map(|w| w.id.clone());
-                        }
-                        // 3. 平铺层彻底空了，找悬浮窗保底
-                        if candidate.is_none() {
-                            let floats: Vec<&WindowData> = state
-                                .windows
-                                .iter()
-                                .filter(|w| {
-                                    (w.tags & state.focused_tags) != 0
-                                        && w.is_floating
-                                        && !w.is_fullscreen
-                                        && w.output.as_deref() == state.focused_output.as_deref()
-                                })
-                                .collect();
-                            if !floats.is_empty() {
-                                let target = match state.pending_focus_dir {
-                                    Some(Direction::Left) => {
-                                        floats.iter().max_by_key(|w| w.float_geo.x).copied()
+                            // --- 【优先响应方向意图 (Edge Search)】 ---
+                            if let Some(dir) = state.pending_focus_dir {
+                                if let Some(out_id) = &state.focused_output {
+                                    let tree_key = (out_id.clone(), state.focused_tags);
+                                    if let Some(root) = state.layout_roots.get(&tree_key) {
+                                        let look_dir = match dir {
+                                            crate::wm::layout::Direction::Left => {
+                                                Some(crate::wm::layout::Direction::Right)
+                                            }
+                                            crate::wm::layout::Direction::Right => {
+                                                Some(crate::wm::layout::Direction::Left)
+                                            }
+                                            _ => None,
+                                        };
+
+                                        if let Some(d) = look_dir {
+                                            let edge_id = Self::find_edge_in_tree(root, d);
+                                            if let Some(_w) = state.windows.iter().find(|w| {
+                                                w.id == edge_id && !w.is_floating && !w.is_minimized
+                                                // 幽灵防御
+                                            }) {
+                                                candidate = Some(edge_id);
+                                            }
+                                        }
                                     }
-                                    Some(Direction::Right) => {
-                                        floats.iter().min_by_key(|w| w.float_geo.x).copied()
+                                }
+                            }
+
+                            // 1. 历史恢复 (仅限平铺) - 降级为第二优先级
+                            if candidate.is_none() {
+                                if let Some(out_id) = &state.focused_output {
+                                    if let Some(hid) = state
+                                        .tag_focus_history
+                                        .get(&(out_id.clone(), state.focused_tags))
+                                    {
+                                        if let Some(_w) = state.windows.iter().find(|w| {
+                                            w.id == *hid && !w.is_floating && !w.is_minimized
+                                        }) {
+                                            candidate = Some(hid.clone());
+                                        }
                                     }
-                                    // --- 即便从平铺切过来，如果没有平铺了，也要能抓到悬浮窗 ---
-                                    _ => floats.first().copied(),
-                                };
-                                candidate = target.map(|w| w.id.clone());
+                                }
+                            }
+
+                            // 2. 找当前 Tag 的任意平铺窗 (保底)
+                            if candidate.is_none() {
+                                candidate = state
+                                    .windows
+                                    .iter()
+                                    .find(|w| {
+                                        (w.tags & state.focused_tags) != 0
+                                            && !w.is_floating
+                                            && !w.is_minimized // 幽灵防御
+                                            && w.output.as_deref() == state.focused_output.as_deref()
+                                    })
+                                    .map(|w| w.id.clone());
+                            }
+                            // 3. 平铺层彻底空了，找悬浮窗保底
+                            if candidate.is_none() {
+                                let floats: Vec<&WindowData> = state
+                                    .windows
+                                    .iter()
+                                    .filter(|w| {
+                                        (w.tags & state.focused_tags) != 0
+                                            && w.is_floating
+                                            && !w.is_fullscreen
+                                            && !w.is_minimized // 幽灵防御
+                                            && w.output.as_deref() == state.focused_output.as_deref()
+                                    })
+                                    .collect();
+                                if !floats.is_empty() {
+                                    let target = match state.pending_focus_dir {
+                                        Some(Direction::Left) => {
+                                            floats.iter().max_by_key(|w| w.float_geo.x).copied()
+                                        }
+                                        Some(Direction::Right) => {
+                                            floats.iter().min_by_key(|w| w.float_geo.x).copied()
+                                        }
+                                        _ => floats.first().copied(),
+                                    };
+                                    candidate = target.map(|w| w.id.clone());
+                                }
                             }
                         }
                     }
@@ -557,7 +559,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     let is_visible = if let Some(win_out_id) = &w_data.output {
                         if let Some(out_data) = state.outputs.get(win_out_id) {
                             // 窗口所属显示器正在看这个窗口的标签
-                            (w_data.tags & out_data.tags) != 0
+                            (w_data.tags & out_data.tags) != 0 && !w_data.is_minimized
                         } else {
                             false
                         }
@@ -568,7 +570,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     if is_visible {
                         w_data.window.show();
                     } else {
-                        w_data.window.hide();
+                        w_data.window.hide(); // 最小化的窗口会在这里被死死按住
                     }
                 }
 
@@ -746,7 +748,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let (br, bg, bb, ba) = Self::parse_color(target_color_str);
 
                 for w_data in state.windows.iter_mut() {
-                    if w_data.is_floating && !w_data.is_fullscreen {
+                    if w_data.is_floating && !w_data.is_fullscreen && !w_data.is_minimized {
                         // 1. 设置尺寸
                         // 悬浮窗口的尺寸存储在 float_geo 中 (由 Actions 初始化或 Dimensions 更新)
                         let target_w = w_data.float_geo.w;
@@ -1119,6 +1121,8 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
             // 当窗口被关闭（比如在终端里输了 exit）
             WinEvent::Closed => {
                 let id = proxy.id();
+                // --- 【幽灵防线 (垃圾回收)】如果这个窗口在小黑屋里被意外杀死了，立刻释放它的插槽 ---
+                state.minimized_slots.retain(|_, v| *v != id);
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
                     let win_tag = w_info.tags;
 

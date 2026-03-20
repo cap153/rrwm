@@ -74,6 +74,7 @@ fn process_entry(
     entry: &crate::config::KeyBindingEntry,
     mode: BindingMode,
 ) {
+    let slot_id = format!("{}_{}", current_mods.bits(), key_or_mod);
     match entry {
         // 情况 1：单个动作
         crate::config::KeyBindingEntry::Action(cfg) => {
@@ -82,6 +83,7 @@ fn process_entry(
                 &cfg.args,
                 &cfg.cmd,
                 &cfg.unit,
+                &slot_id,
             )];
             commit_binding(
                 state,
@@ -98,7 +100,9 @@ fn process_entry(
         crate::config::KeyBindingEntry::List(cfgs) => {
             let actions = cfgs
                 .iter()
-                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit))
+                .map(|cfg| {
+                    Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit, &slot_id)
+                })
                 .collect();
             commit_binding(
                 state,
@@ -160,7 +164,10 @@ fn commit_pointer_binding(
     let button_code = match parse_pointer_button(button_name) {
         Some(code) => code,
         None => {
-            error!("-> [Pointer Binding Error] Unknown button name: {}", button_name);
+            error!(
+                "-> [Pointer Binding Error] Unknown button name: {}",
+                button_name
+            );
             return;
         }
     };
@@ -188,6 +195,7 @@ fn process_pointer_entry(
     entry: &crate::config::KeyBindingEntry,
     mode: BindingMode,
 ) {
+    let slot_id = format!("ptr_{}_{}", current_mods.bits(), btn_or_mod);
     match entry {
         crate::config::KeyBindingEntry::Action(cfg) => {
             let actions = vec![Action::from_config(
@@ -195,6 +203,7 @@ fn process_pointer_entry(
                 &cfg.args,
                 &cfg.cmd,
                 &cfg.unit,
+                &slot_id,
             )];
             commit_pointer_binding(
                 state,
@@ -210,7 +219,9 @@ fn process_pointer_entry(
         crate::config::KeyBindingEntry::List(cfgs) => {
             let actions = cfgs
                 .iter()
-                .map(|cfg| Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit))
+                .map(|cfg| {
+                    Action::from_config(&cfg.action, &cfg.args, &cfg.cmd, &cfg.unit, &slot_id)
+                })
                 .collect();
             commit_pointer_binding(
                 state,

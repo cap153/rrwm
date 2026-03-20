@@ -118,6 +118,7 @@ fn main() {
         pointer_op_edges: 0,
         pending_op_start: false,
         pending_op_end: false,
+        minimized_slots: HashMap::new(),
     };
 
     let _registry = display.get_registry(&qh, ());
