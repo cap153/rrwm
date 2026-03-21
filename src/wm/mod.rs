@@ -776,7 +776,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         let target_h = w_data.float_geo.h;
 
                         // 避免重复发送 (Last Proposed Check)
-                        if w_data.last_proposed_w != target_w || w_data.last_proposed_h != target_h || w_data.layout_retry_count > 0
+                        if w_data.last_proposed_w != target_w
+                            || w_data.last_proposed_h != target_h
+                            || w_data.layout_retry_count > 0
                         {
                             w_data.window.propose_dimensions(target_w, target_h);
                             w_data.last_proposed_w = target_w;
@@ -1086,7 +1088,6 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                         } else if edges.contains(Edges::Left) {
                             new_geo.w = (initial_geo.w - dx).max(50);
                             new_geo.x = initial_geo.x + (initial_geo.w - new_geo.w);
-                            // X要跟着左移
                         }
 
                         // 上下拉伸
@@ -1095,11 +1096,55 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                         } else if edges.contains(Edges::Top) {
                             new_geo.h = (initial_geo.h - dy).max(50);
                             new_geo.y = initial_geo.y + (initial_geo.h - new_geo.h);
-                            // Y要跟着上移
                         }
-
                         w.float_geo = new_geo;
                     }
+
+                    // --- 【中心点法则 (Center Point Rule) 动态归属权切换】 ---
+                    let cx = w.float_geo.x + (w.float_geo.w / 2);
+                    let cy = w.float_geo.y + (w.float_geo.h / 2);
+
+                    let mut new_owner = None;
+                    // 遍历所有显示器，寻找包含了中心点的屏幕
+                    for (out_name, out_data) in &state.outputs {
+                        // 使用 full_area 判定，即使中心点移到了 Waybar 区域也能正确识别
+                        let area = out_data.full_area;
+                        if cx >= area.x
+                            && cx < area.x + area.w
+                            && cy >= area.y
+                            && cy < area.y + area.h
+                        {
+                            new_owner = Some((out_name.clone(), out_data.tags));
+                            break;
+                        }
+                    }
+
+                    // 如果找到了归属地，并且和当前的不一样，执行过户手续
+                    if let Some((new_out_name, new_out_tags)) = new_owner {
+                        if w.output.as_deref() != Some(&new_out_name) {
+                            info!("-> [Pointer] Window center crossed boundary, transferring ownership to {}", new_out_name);
+
+                            // 1. 清理旧屏幕的焦点历史 (严谨的垃圾回收)
+                            if let Some(old_out) = &w.output {
+                                let old_key = (old_out.clone(), w.tags);
+                                if state.tag_focus_history.get(&old_key) == Some(&w.id) {
+                                    state.tag_focus_history.remove(&old_key);
+                                }
+                            }
+
+                            // 2. 更新窗口的归属地和标签，使其完美融入新屏幕
+                            w.output = Some(new_out_name.clone());
+                            w.tags = new_out_tags;
+
+                            // 3. 更新全局焦点状态和新屏幕的焦点历史
+                            state
+                                .tag_focus_history
+                                .insert((new_out_name.clone(), new_out_tags), w.id.clone());
+                            state.focused_output = Some(new_out_name);
+                            state.focused_tags = new_out_tags;
+                        }
+                    }
+                    // ------------------------------------------------------------------
                 }
             }
 

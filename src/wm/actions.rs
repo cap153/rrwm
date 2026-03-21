@@ -1044,10 +1044,10 @@ impl AppState {
             Action::ToggleMinimizeRestore(slot_id) => {
                 // --- 【全屏绝对拦截】 ---
                 let has_fullscreen = self.windows.iter().any(|w| {
-                    w.is_fullscreen 
-                    && !w.is_minimized 
-                    && w.output.as_deref() == self.focused_output.as_deref() 
-                    && (w.tags & self.focused_tags) != 0
+                    w.is_fullscreen
+                        && !w.is_minimized
+                        && w.output.as_deref() == self.focused_output.as_deref()
+                        && (w.tags & self.focused_tags) != 0
                 });
 
                 if has_fullscreen {
@@ -1058,11 +1058,11 @@ impl AppState {
                 // 1. 尝试从小黑屋里捞人
                 if let Some(target_win_id) = self.minimized_slots.remove(&slot_id) {
                     // ======= 【释放 (Restore) 逻辑】 =======
-                    info!("-> [Minimize] Restoring window {:?} from slot [{}]", target_win_id, slot_id);
-                    
-                    let mut is_floating = false;
-                    let mut win_data_opt = None;
-                    
+                    info!(
+                        "-> [Minimize] Restoring window {:?} from slot [{}]",
+                        target_win_id, slot_id
+                    );
+
                     // 获取当前正在操作的屏幕和标签（目标着陆点）
                     let cur_out = match self.focused_output.clone() {
                         Some(o) => o,
@@ -1070,12 +1070,53 @@ impl AppState {
                     };
                     let cur_tags = self.focused_tags;
 
-                    // 撕掉封条，赋予新身份
+                    let mut is_floating = false;
+                    let mut needs_new_geo = false;
+                    let mut req_w = 0;
+                    let mut req_h = 0;
+
+                    // --- 1. 获取原状态，判断是否跨了显示器 ---
+                    if let Some(w) = self.windows.iter().find(|w| w.id == target_win_id) {
+                        is_floating = w.is_floating;
+                        req_w = w.float_geo.w;
+                        req_h = w.float_geo.h;
+                        // 如果它进去时的显示器，和现在你要召唤它的显示器不是同一个，就需要重新计算坐标
+                        if w.output.as_deref() != Some(cur_out.as_str()) {
+                            needs_new_geo = true;
+                        }
+                    }
+
+                    // --- 2. 【复用智能空位查找】 ---
+                    let mut new_float_geo = None;
+                    if is_floating && needs_new_geo {
+                        if let Some(out_data) = self.outputs.get(&cur_out) {
+                            new_float_geo = Some(self.calculate_floating_geometry(
+                                &target_win_id,
+                                &cur_out,
+                                cur_tags,
+                                out_data.usable_area,
+                                req_w,
+                                req_h,
+                            ));
+                        }
+                    }
+
+                    // --- 3. 撕掉封条，赋予新身份 ---
+                    let mut win_data_opt = None;
                     if let Some(w) = self.windows.iter_mut().find(|w| w.id == target_win_id) {
                         w.is_minimized = false;
                         w.output = Some(cur_out.clone());
                         w.tags = cur_tags;
-                        is_floating = w.is_floating;
+
+                        // 应用新的智能坐标（如果是跨屏召唤）
+                        if let Some(geo) = new_float_geo {
+                            w.float_geo = geo;
+                        }
+
+                        // 强制重置，确保 ManageStart 能发送一次 propose_dimensions，防止尺寸假死
+                        w.last_proposed_w = 0;
+                        w.last_proposed_h = 0;
+
                         win_data_opt = Some(w.clone());
                     }
 
@@ -1085,16 +1126,25 @@ impl AppState {
                             // 如果是平铺窗，需要重新插入 BSP 树
                             let tree_key = (cur_out.clone(), cur_tags);
                             if !self.layout_roots.contains_key(&tree_key) {
-                                self.layout_roots.insert(tree_key.clone(), LayoutNode::Window(w_data.clone()));
+                                self.layout_roots
+                                    .insert(tree_key.clone(), LayoutNode::Window(w_data.clone()));
                             } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
                                 // 找当前焦点窗口作为切分目标
-                                let insert_target = self.focused_window.clone().unwrap_or_else(|| target_win_id.clone());
-                                
-                                let split = if let Some(geo) = self.last_geometry.get(&insert_target) {
-                                    if geo.w > geo.h { SplitType::Vertical } else { SplitType::Horizontal }
-                                } else {
-                                    SplitType::Vertical
-                                };
+                                let insert_target = self
+                                    .focused_window
+                                    .clone()
+                                    .unwrap_or_else(|| target_win_id.clone());
+
+                                let split =
+                                    if let Some(geo) = self.last_geometry.get(&insert_target) {
+                                        if geo.w > geo.h {
+                                            SplitType::Vertical
+                                        } else {
+                                            SplitType::Horizontal
+                                        }
+                                    } else {
+                                        SplitType::Vertical
+                                    };
 
                                 // 插入失败则强制合并到根节点
                                 if !root.insert_at(&insert_target, w_data.clone(), split, None) {
@@ -1113,8 +1163,9 @@ impl AppState {
 
                         // 夺取焦点，君临天下
                         self.focused_window = Some(target_win_id.clone());
-                        self.tag_focus_history.insert((cur_out, cur_tags), target_win_id.clone());
-                        
+                        self.tag_focus_history
+                            .insert((cur_out, cur_tags), target_win_id.clone());
+
                         if let Some(seat) = &self.main_seat {
                             seat.focus_window(&w_data.window);
                         }
@@ -1124,15 +1175,20 @@ impl AppState {
                     } else {
                         // 捞到了 ID，但在 windows 列表里没找到（说明在小黑屋里被意外杀死了）
                         // 已经 remove 掉了，无事发生，直接忽略
-                        warn!("-> [Minimize] Ghost window {:?} removed from slot [{}]", target_win_id, slot_id);
+                        warn!(
+                            "-> [Minimize] Ghost window {:?} removed from slot [{}]",
+                            target_win_id, slot_id
+                        );
                     }
-
                 } else {
                     // ======= 【藏匿 (Minimize) 逻辑】 =======
                     // 屋子是空的，把当前焦点关进去
                     if let Some(f_id) = self.focused_window.clone() {
-                        info!("-> [Minimize] Minimizing window {:?} to slot [{}]", f_id, slot_id);
-                        
+                        info!(
+                            "-> [Minimize] Minimizing window {:?} to slot [{}]",
+                            f_id, slot_id
+                        );
+
                         let mut is_floating = false;
                         let mut old_out = None;
                         let mut old_tags = 0;
@@ -1149,13 +1205,13 @@ impl AppState {
 
                         if let Some(out_name) = old_out {
                             let tree_key = (out_name.clone(), old_tags);
-                            
+
                             // 设置方向限制，防止 ManageStart 找接班人时跨界
                             if is_floating {
                                 self.restrict_focus_to_floating = true;
                             } else {
                                 self.restrict_focus_to_tiling = true;
-                                
+
                                 // 从 BSP 树中抹除存在感
                                 if let Some(root) = self.layout_roots.remove(&tree_key) {
                                     if let Some(new_root) = LayoutNode::remove_at(root, &f_id) {
@@ -1167,13 +1223,17 @@ impl AppState {
                             // 焦点历史平滑移交
                             if self.tag_focus_history.get(&tree_key) == Some(&f_id) {
                                 self.tag_focus_history.remove(&tree_key);
-                                let replacement = self.windows.iter().find(|w| {
-                                    w.id != f_id && 
-                                    w.output.as_ref() == Some(&out_name) && 
-                                    (w.tags & old_tags) != 0 &&
-                                    w.is_floating == is_floating &&
-                                    !w.is_minimized // 【注意】不能找同在小黑屋的难友接班
-                                }).map(|w| w.id.clone());
+                                let replacement = self
+                                    .windows
+                                    .iter()
+                                    .find(|w| {
+                                        w.id != f_id
+                                            && w.output.as_ref() == Some(&out_name)
+                                            && (w.tags & old_tags) != 0
+                                            && w.is_floating == is_floating
+                                            && !w.is_minimized // 【注意】不能找同在小黑屋的难友接班
+                                    })
+                                    .map(|w| w.id.clone());
 
                                 if let Some(rid) = replacement {
                                     self.tag_focus_history.insert(tree_key, rid);
@@ -1183,7 +1243,7 @@ impl AppState {
 
                         // 清空当前焦点，把寻找接班人的任务交给下一帧的 ManageStart
                         self.focused_window = None;
-                        
+
                         if let Some(wm) = &self.river_wm {
                             wm.manage_dirty();
                         }
