@@ -208,6 +208,9 @@ i = { action = "grow_width", unit = "10" }
 Return = { action = "exit_resize_mode" }
 Escape = { action = "exit_resize_mode" }
 
+[resize.alt]
+r = { action = "exit_resize_mode" } # The effect here is the same as "toggle_resize_mode".
+
 [resize.shift]
 # Combined shortcut shift+n/e/i/u for minor window size adjustments
 n = { action = "shrink_width", unit = "5"}

@@ -206,6 +206,9 @@ i = { action = "grow_width", unit = "10" }
 Return = { action = "exit_resize_mode" }
 Escape = { action = "exit_resize_mode" }
 
+[resize.alt]
+r = { action = "exit_resize_mode" } # 这里的效果和toggle_resize_mode是一样的
+
 [resize.shift]
 # 组合快捷键 shift+n/e/i/u 小幅度调整窗口大小
 n = { action = "shrink_width", unit = "5"}
