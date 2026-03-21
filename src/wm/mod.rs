@@ -1324,6 +1324,11 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             }
                         }
                     }
+                    // --- 【自动全屏的清场逻辑】 ---
+                    if should_fullscreen {
+                        // mpv 等应用被规则判定为全屏，立刻踢掉当前 Tag 的旧全屏窗口
+                        state.clear_other_fullscreen(&id, &Some(out_id.clone()), current_tag);
+                    }
 
                     // --- 2. 如果是悬浮窗口，计算坐标并跳过平铺树 ---
                     let mut new_float_geo = None;
@@ -1446,15 +1451,20 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
             }
             // --- 处理全屏请求 ---
             WinEvent::FullscreenRequested { output: _ } => {
-                // 注：虽然应用可能建议了 output，但为了稳健，我们强制它在当前所在的显示器全屏
-                // 这样可以避免应用瞎指挥导致窗口跳到别的屏幕去
                 let id = proxy.id();
                 info!("-> [Event] Window {:?} requested Fullscreen (F11)", id);
 
+                // --- 【提前清场】 ---
+                let (out_name, tags) = if let Some(w) = state.windows.iter().find(|w| w.id == id) {
+                    (w.output.clone(), w.tags)
+                } else {
+                    (None, 0)
+                };
+                state.clear_other_fullscreen(&id, &out_name, tags);
+                // --------------------------
+
                 if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
-                    // 1. 只更新意图状态
                     w.is_fullscreen = true;
-                    // 2. 请求调度
                     if let Some(wm) = &state.river_wm {
                         wm.manage_dirty();
                     }
@@ -1510,37 +1520,13 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                     // --- 2. 悬浮窗口处理 ---
                     if w.is_floating {
-                        // 判定是否处于交互式调整大小状态 (WM 强权或 CSD 请求)
-                        let is_resizing = state.pointer_op_mode == PointerOpMode::Resize
-                            && state.pointer_op_target.as_ref() == Some(&w.id);
+                        // 悬浮窗口是自由的，我们无条件信任客户端汇报的尺寸。
+                        // 避免和应用的宽高比 (Aspect Ratio) 发生冲突。
+                        w.float_geo.w = width as i32;
+                        w.float_geo.h = height as i32;
 
-                        if is_resizing {
-                            // 正在被手动调整大小，绝对信任客户端汇报的尺寸，更新底账
-                            w.float_geo.w = width as i32;
-                            w.float_geo.h = height as i32;
-                            w.layout_retry_count = 0;
-                        } else {
-                            // 没人动它，它却自己变了尺寸（通常是刚启动时不听话），强行纠正它
-                            let dw = (width as i32 - w.float_geo.w).abs();
-                            let dh = (height as i32 - w.float_geo.h).abs();
-
-                            if dw > 2 || dh > 2 {
-                                if w.layout_retry_count < 3 {
-                                    w.layout_retry_count += 1;
-                                    if let Some(wm) = &state.river_wm {
-                                        wm.manage_dirty();
-                                    }
-                                } else if w.layout_retry_count == 50 {
-                                    // 放弃治疗：如果电击了 50 次它还坚持自己的尺寸，
-                                    // 妥协接受它的尺寸，防止死循环烧毁 CPU
-                                    w.float_geo.w = width as i32;
-                                    w.float_geo.h = height as i32;
-                                    w.layout_retry_count += 1;
-                                }
-                            } else {
-                                w.layout_retry_count = 0;
-                            }
-                        }
+                        // 确保清零重试计数器！防止残留的数值干扰后续的全屏切换！
+                        w.layout_retry_count = 0;
                         return;
                     }
 

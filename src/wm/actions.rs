@@ -1381,18 +1381,26 @@ impl AppState {
             }
             Action::ToggleFullscreen => {
                 if let Some(f_id) = self.focused_window.clone() {
-                    if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
-                        // 1. 切换内存状态
-                        w.is_fullscreen = !w.is_fullscreen;
-                        info!(
-                            "-> [Action] Toggle fullscreen state for window {:?}: {}",
-                            f_id, w.is_fullscreen
-                        );
-
-                        // 2. 告诉 River 我们状态变了，请尽快发起 ManageStart 让我们执行渲染
-                        if let Some(wm) = &self.river_wm {
-                            wm.manage_dirty();
+                    // 1. 先查出目标窗口接下来是不是要变成全屏，以及它的位置
+                    let (will_be_fullscreen, out_name, tags) = {
+                        if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                            (!w.is_fullscreen, w.output.clone(), w.tags)
+                        } else {
+                            (false, None, 0)
                         }
+                    };
+
+                    // 2. 如果是要变成全屏，提前清场！
+                    if will_be_fullscreen {
+                        self.clear_other_fullscreen(&f_id, &out_name, tags);
+                    }
+
+                    // 3. 应用状态并触发渲染
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                        w.is_fullscreen = will_be_fullscreen;
+                    }
+                    if let Some(wm) = &self.river_wm {
+                        wm.manage_dirty();
                     }
                 }
             }
@@ -2277,5 +2285,27 @@ impl AppState {
             }
         }
         0.5 // 解析失败默认给一半
+    }
+    /// 辅助：全屏“清场”。当一个新窗口即将全屏时，将同显示器、同 Tag 下的其他全屏窗口强行降级
+    pub fn clear_other_fullscreen(
+        &mut self,
+        exempt_id: &wayland_backend::client::ObjectId,
+        out_name: &Option<String>,
+        tags: u32,
+    ) {
+        for w in self.windows.iter_mut() {
+            if &w.id != exempt_id
+                && w.is_fullscreen
+                && w.output == *out_name
+                && (w.tags & tags) != 0
+            {
+                info!(
+                    "-> [Fullscreen] Demoting window {:?} to make way for new fullscreen {:?}",
+                    w.id, exempt_id
+                );
+                w.is_fullscreen = false;
+                // 这里不需要发 exit_fullscreen，因为 ManageStart 会根据 is_fullscreen == false 自动执行退场逻辑
+            }
+        }
     }
 }
