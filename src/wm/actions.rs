@@ -933,78 +933,74 @@ impl AppState {
 
             // --- 尺寸调整指令 ---
             Action::Resize(axis, delta) => {
-                if self.is_resize_mode {
-                    if let Some(f_id) = self.focused_window.clone() {
-                        let mut is_floating = false;
-                        let mut out_name = None;
-                        let mut win_tags = 0;
+                if let Some(f_id) = self.focused_window.clone() {
+                    let mut is_floating = false;
+                    let mut out_name = None;
+                    let mut win_tags = 0;
 
-                        if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
-                            is_floating = w.is_floating;
-                            out_name = w.output.clone();
-                            win_tags = w.tags;
-                        }
+                    if let Some(w) = self.windows.iter().find(|w| w.id == f_id) {
+                        is_floating = w.is_floating;
+                        out_name = w.output.clone();
+                        win_tags = w.tags;
+                    }
 
-                        if is_floating {
-                            // --- 悬浮窗口调整：直接改数值，设个最小兜底 ---
-                            if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
-                                match axis {
-                                    ResizeAxis::Horizontal => {
-                                        w.float_geo.w = (w.float_geo.w + delta).max(50);
-                                    }
-                                    ResizeAxis::Vertical => {
-                                        w.float_geo.h = (w.float_geo.h + delta).max(50);
-                                    }
+                    if is_floating {
+                        // --- 悬浮窗口调整：直接改数值，设个最小兜底 ---
+                        if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                            match axis {
+                                ResizeAxis::Horizontal => {
+                                    w.float_geo.w = (w.float_geo.w + delta).max(50);
                                 }
-                            }
-                        } else {
-                            // --- 平铺窗口调整：召唤 BSP 树魔法 ---
-                            if let Some(out_id) = out_name {
-                                let tree_key = (out_id.clone(), win_tags);
-                                // 取出显示器的屏幕大小，用于计算 delta_ratio
-                                let usable_area =
-                                    self.outputs.get(&out_id).map(|o| o.usable_area).unwrap_or(
-                                        Geometry {
-                                            x: 0,
-                                            y: 0,
-                                            w: 1920,
-                                            h: 1080,
-                                        },
-                                    );
-
-                                if let Some(root) = self.layout_roots.get_mut(&tree_key) {
-                                    root.apply_resize(&f_id, usable_area, axis, delta);
+                                ResizeAxis::Vertical => {
+                                    w.float_geo.h = (w.float_geo.h + delta).max(50);
                                 }
                             }
                         }
+                    } else {
+                        // --- 平铺窗口调整：召唤 BSP 树魔法 ---
+                        if let Some(out_id) = out_name {
+                            let tree_key = (out_id.clone(), win_tags);
+                            // 取出显示器的屏幕大小，用于计算 delta_ratio
+                            let usable_area =
+                                self.outputs.get(&out_id).map(|o| o.usable_area).unwrap_or(
+                                    Geometry {
+                                        x: 0,
+                                        y: 0,
+                                        w: 1920,
+                                        h: 1080,
+                                    },
+                                );
 
-                        // 强制刷新渲染
-                        if let Some(wm) = &self.river_wm {
-                            wm.manage_dirty();
+                            if let Some(root) = self.layout_roots.get_mut(&tree_key) {
+                                root.apply_resize(&f_id, usable_area, axis, delta);
+                            }
                         }
+                    }
+
+                    // 强制刷新渲染
+                    if let Some(wm) = &self.river_wm {
+                        wm.manage_dirty();
                     }
                 }
             }
 
             // --- 移动悬浮窗口指令 ---
             Action::MoveStep(dir, step) => {
-                if self.is_resize_mode {
-                    if let Some(f_id) = self.focused_window.clone() {
-                        if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
-                            if w.is_floating {
-                                match dir {
-                                    Direction::Left => w.float_geo.x -= step,
-                                    Direction::Right => w.float_geo.x += step,
-                                    Direction::Up => w.float_geo.y -= step,
-                                    Direction::Down => w.float_geo.y += step,
-                                }
-                                if let Some(wm) = &self.river_wm {
-                                    wm.manage_dirty();
-                                }
-                            } else {
-                                // 如果你是平铺窗口，MoveStep 没有任何意义，忽略
-                                info!("-> [Resize] Cannot move tiling window via MoveStep.");
+                if let Some(f_id) = self.focused_window.clone() {
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.id == f_id) {
+                        if w.is_floating {
+                            match dir {
+                                Direction::Left => w.float_geo.x -= step,
+                                Direction::Right => w.float_geo.x += step,
+                                Direction::Up => w.float_geo.y -= step,
+                                Direction::Down => w.float_geo.y += step,
                             }
+                            if let Some(wm) = &self.river_wm {
+                                wm.manage_dirty();
+                            }
+                        } else {
+                            // 如果你是平铺窗口，MoveStep 没有任何意义，忽略
+                            info!("-> [Resize] Cannot move tiling window via MoveStep.");
                         }
                     }
                 }
