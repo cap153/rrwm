@@ -198,7 +198,7 @@ e = { action = "move", args = ["down_output"] }
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
-[resize]
+[resize] # Acitons such as "shrink_width" can also be used in ordinary shortcut keys. The resize mode elegantly isolates two sets of shortcut keys.
 # Adjust window size, unit 10px
 n = { action = "shrink_width", unit = "10" }
 e = { action = "grow_height", unit = "10" }
@@ -218,7 +218,7 @@ e = { action = "grow_height", unit = "5"}
 u = { action = "shrink_height", unit = "5"}
 i = { action = "grow_width", unit = "5"}
 
-[resize.alt_shift]
+[resize.alt_shift] # When unit is carried, the function becomes moving by pixels.
 # Combined shortcut alt+shift+n/e/i/u to move window coordinates, unit 5px
 n = { action = "move", args = ["left"], unit = "5" }
 i = { action = "move", args = ["right"], unit = "5" }

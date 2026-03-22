@@ -196,7 +196,7 @@ e = { action = "move", args = ["down_output"] }
 n = { action = "move", args = ["left_output"] }
 i = { action = "move", args = ["right_output"] }
 
-[resize]
+[resize] # "shrink_width"等aciton也可以在普通快捷键中使用，resize模式优雅的隔离了两组快捷键
 # 调整窗口大小，单位10px
 n = { action = "shrink_width", unit = "10" }
 e = { action = "grow_height", unit = "10" }
@@ -216,7 +216,7 @@ e = { action = "grow_height", unit = "5"}
 u = { action = "shrink_height", unit = "5"}
 i = { action = "grow_width", unit = "5"}
 
-[resize.alt_shift]
+[resize.alt_shift] # 携带了unit时功能就变成了按像素移动
 # 组合快捷键 alt+shift+n/e/i/u 移动窗口坐标，单位5px
 n = { action = "move", args = ["left"], unit = "5" }
 i = { action = "move", args = ["right"], unit = "5" }
