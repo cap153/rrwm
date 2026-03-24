@@ -2,6 +2,10 @@
 
 [中文README](README_CN.md)
 
+[[Video] Feature Overview](https://www.youtube.com/watch?v=of0Jt_hqNO4&list=PLWSurdQkgoVUXJKW5QTtVaP7WXStyLLyy&index=1)
+
+[[Video] v0.1.1 new features](https://www.youtube.com/watch?v=hUQIJ_3N5t8&list=PLWSurdQkgoVUXJKW5QTtVaP7WXStyLLyy&index=2)
+
 # Dependencies
 
 * [river](https://codeberg.org/river/river) 0.4.0
