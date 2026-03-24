@@ -119,6 +119,7 @@ fn main() {
         pending_op_start: false,
         pending_op_end: false,
         minimized_slots: HashMap::new(),
+        anim_start_time: None,
     };
 
     let _registry = display.get_registry(&qh, ());

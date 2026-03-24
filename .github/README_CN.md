@@ -256,6 +256,7 @@ rrwm
         ├── mod.rs       # 业务中枢：AppState 定义、所有 Dispatch 实现
         ├── layout.rs    # 布局引擎：BSP 树、Cosmic 切割算法、递归插入/删除
         ├── actions.rs   # 动作系统：IPC 广播、焦点查找、跨标签移动逻辑
+        ├── animation.rs # 动画计算引擎
         └── binds.rs     # 输入映射：解析配置并注册 XKB 绑定对象
 ```
 

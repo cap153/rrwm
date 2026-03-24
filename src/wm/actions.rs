@@ -4,7 +4,7 @@ use crate::wm::AppState;
 use crate::wm::OutputData;
 use serde::Serialize;
 use std::io::{Read, Write};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use wayland_backend::client::ObjectId; // 修复点：引入 ObjectId 类型
 use wayland_client::protocol::wl_output::Transform; // 旋转枚举
 use wayland_client::{Proxy, QueueHandle};
@@ -1995,7 +1995,7 @@ impl AppState {
         }
         // 1. 尝试在当前方向寻找邻居
         if let Some(neighbor_id) = self.find_neighbor(win_id, dir) {
-            info!(
+            debug!(
                 "-> Discover neighbor {:?} and perform location exchange",
                 neighbor_id
             );

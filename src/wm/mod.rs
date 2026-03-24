@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod animation;
 pub mod binds;
 pub mod layout;
 use self::actions::Action;
@@ -48,6 +49,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use wayland_backend::client::ObjectId;
 use wayland_client::protocol::wl_registry;
@@ -107,6 +109,8 @@ pub struct WindowData {
     pub is_floating: bool,
     pub float_geo: Geometry,
     pub is_minimized: bool,
+    pub anim_start_geo: Option<Geometry>,
+    pub anim_target_geo: Option<Geometry>,
 }
 
 pub struct ModeInfo {
@@ -177,6 +181,7 @@ pub struct AppState {
     pub pending_op_start: bool,
     pub pending_op_end: bool,
     pub minimized_slots: HashMap<String, wayland_backend::client::ObjectId>,
+    pub anim_start_time: Option<Instant>,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -276,6 +281,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         h: 0,
                     },
                     is_minimized: false,
+                    anim_start_geo: None,
+                    anim_target_geo: None,
                 });
             }
             WmEvent::ManageStart => {
@@ -526,6 +533,53 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 state.restrict_focus_to_tiling = false;
                 state.restrict_focus_to_floating = false;
                 state.pending_focus_dir = None;
+                // ==========================================
+                // --- 【全局动画时钟引擎】 ---
+                // ==========================================
+                let anim_enabled = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.enable.as_deref())
+                    .unwrap_or("true")
+                    == "true";
+                let anim_duration = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.duration.as_deref())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(150);
+
+                let mut anim_progress = 1.0;
+                let mut is_animating = false;
+
+                if anim_enabled {
+                    if let Some(start_time) = state.anim_start_time {
+                        let elapsed = start_time.elapsed().as_millis() as u64;
+                        if elapsed < anim_duration {
+                            anim_progress = elapsed as f32 / anim_duration as f32;
+                            is_animating = true;
+                            if let Some(wm) = &state.river_wm {
+                                wm.manage_dirty();
+                            }
+                        } else {
+                            state.anim_start_time = None; // 动画结束
+                                                          // 动画结束瞬间，强制清空所有窗口的 last_proposed 记录。
+                                                          // 这会逼迫下一帧发送最终的尺寸建议，从而在动画结束后触发一次真实的 Dimensions 检查。
+                            for w in &mut state.windows {
+                                w.last_proposed_w = 0;
+                                w.last_proposed_h = 0;
+                            }
+                            if let Some(wm) = &state.river_wm {
+                                wm.manage_dirty();
+                            }
+                        }
+                    }
+                } else {
+                    state.anim_start_time = None;
+                }
+                // ==========================================
                 // --- 遍历所有窗口，根据 is_fullscreen 标志，强制同步 Wayland 状态 ---
                 for w in state.windows.iter_mut() {
                     if w.is_fullscreen {
@@ -722,6 +776,51 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 let final_w = (geom.w - off_l - off_r).max(1);
                                 let final_h = (geom.h - off_t - off_b).max(1);
 
+                                // 组装目标几何体 (Target Geometry)
+                                let target_geo = crate::wm::layout::Geometry {
+                                    x: geom.x + off_l,
+                                    y: geom.y + off_t,
+                                    w: final_w,
+                                    h: final_h,
+                                };
+
+                                // 探测是否发生了布局改变 (比如新增了窗口、焦点切换导致边框改变)
+                                let geo_changed = w_data
+                                    .anim_target_geo
+                                    .map(|g| {
+                                        g.x != target_geo.x
+                                            || g.y != target_geo.y
+                                            || g.w != target_geo.w
+                                            || g.h != target_geo.h
+                                    })
+                                    .unwrap_or(true);
+
+                                if geo_changed {
+                                    // 发生改变！将当前的进度存为新起点，触发动画
+                                    w_data.anim_start_geo =
+                                        w_data.anim_target_geo.or(Some(target_geo));
+                                    w_data.anim_target_geo = Some(target_geo);
+                                    if anim_enabled {
+                                        state.anim_start_time = Some(std::time::Instant::now());
+                                        is_animating = true;
+                                        anim_progress = 0.0;
+                                    }
+                                }
+
+                                // 插值计算这一帧应该多大
+                                let (propose_w, propose_h) = if is_animating {
+                                    let start = w_data.anim_start_geo.unwrap_or(target_geo);
+                                    let current = crate::wm::animation::interpolate_geo(
+                                        start,
+                                        target_geo,
+                                        anim_progress,
+                                    );
+                                    (current.w, current.h)
+                                } else {
+                                    (target_geo.w, target_geo.h)
+                                };
+
+                                // 存入 last_geometry 供重试判定使用 (这里必须存最终目标)
                                 state.last_geometry.insert(
                                     window.id(),
                                     crate::wm::layout::Geometry {
@@ -732,13 +831,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     },
                                 );
 
-                                if w_data.last_proposed_w != final_w
-                                    || w_data.last_proposed_h != final_h
+                                if w_data.last_proposed_w != propose_w
+                                    || w_data.last_proposed_h != propose_h
                                     || w_data.layout_retry_count > 0
                                 {
-                                    window.propose_dimensions(final_w, final_h);
-                                    w_data.last_proposed_w = final_w;
-                                    w_data.last_proposed_h = final_h;
+                                    window.propose_dimensions(propose_w, propose_h);
+                                    w_data.last_proposed_w = propose_w;
+                                    w_data.last_proposed_h = propose_h;
                                 }
                                 window.set_tiled(
                                     crate::protocol::river_wm::river_window_v1::Edges::all(),
@@ -770,19 +869,55 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                 for w_data in state.windows.iter_mut() {
                     if w_data.is_floating && !w_data.is_minimized {
-                        // 1. 设置尺寸
-                        // 悬浮窗口的尺寸存储在 float_geo 中 (由 Actions 初始化或 Dimensions 更新)
-                        let target_w = w_data.float_geo.w;
-                        let target_h = w_data.float_geo.h;
+                        // --- 【替换开始：植入动画插值计算】 ---
+                        let target_geo = w_data.float_geo;
 
-                        // 避免重复发送 (Last Proposed Check)
-                        if w_data.last_proposed_w != target_w
-                            || w_data.last_proposed_h != target_h
+                        // 特例：如果是用户在用鼠标拖拽，绝对不能加动画！必须零延迟跟手！
+                        let is_interactive = state.pointer_op_mode != PointerOpMode::None
+                            && state.pointer_op_target.as_ref() == Some(&w_data.id);
+
+                        let geo_changed = w_data
+                            .anim_target_geo
+                            .map(|g| {
+                                g.x != target_geo.x
+                                    || g.y != target_geo.y
+                                    || g.w != target_geo.w
+                                    || g.h != target_geo.h
+                            })
+                            .unwrap_or(true);
+
+                        if geo_changed {
+                            if is_interactive {
+                                w_data.anim_start_geo = Some(target_geo);
+                            } else {
+                                w_data.anim_start_geo = w_data.anim_target_geo.or(Some(target_geo));
+                                if anim_enabled {
+                                    state.anim_start_time = Some(std::time::Instant::now());
+                                    is_animating = true;
+                                    anim_progress = 0.0;
+                                }
+                            }
+                            w_data.anim_target_geo = Some(target_geo);
+                        }
+                        let (propose_w, propose_h) = if is_animating && !is_interactive {
+                            let start = w_data.anim_start_geo.unwrap_or(target_geo);
+                            let current = crate::wm::animation::interpolate_geo(
+                                start,
+                                target_geo,
+                                anim_progress,
+                            );
+                            (current.w, current.h)
+                        } else {
+                            (target_geo.w, target_geo.h)
+                        };
+
+                        if w_data.last_proposed_w != propose_w
+                            || w_data.last_proposed_h != propose_h
                             || w_data.layout_retry_count > 0
                         {
-                            w_data.window.propose_dimensions(target_w, target_h);
-                            w_data.last_proposed_w = target_w;
-                            w_data.last_proposed_h = target_h;
+                            w_data.window.propose_dimensions(propose_w, propose_h);
+                            w_data.last_proposed_w = propose_w;
+                            w_data.last_proposed_h = propose_h;
                         }
 
                         // 2. 设置边框, 沿用聚焦/非聚焦的颜色逻辑
@@ -847,7 +982,35 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
+                // --- 【全局动画时钟同步】 ---
                 let win_cfg = state.config.window.as_ref();
+                let anim_enabled = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.enable.as_deref())
+                    .unwrap_or("true")
+                    == "true";
+                let anim_duration = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.duration.as_deref())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(150);
+
+                let mut anim_progress = 1.0;
+                let mut is_animating = false;
+                if anim_enabled {
+                    if let Some(start_time) = state.anim_start_time {
+                        let elapsed = start_time.elapsed().as_millis() as u64;
+                        if elapsed < anim_duration {
+                            anim_progress = elapsed as f32 / anim_duration as f32;
+                            is_animating = true;
+                        }
+                    }
+                }
+                // ==========================================
                 let mut gaps_val = win_cfg
                     .and_then(|c| c.gaps.as_ref())
                     .and_then(|s| s.parse::<u32>().ok())
@@ -880,23 +1043,60 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 }
                                 if let Some(node) = &w_data.node {
                                     let screen = out_data.usable_area;
-                                    let off_l = if is_smart && window_count <= 1 {
-                                        0
-                                    } else if geom.x == screen.x {
-                                        gaps_val as i32
-                                    } else {
-                                        (gaps_val as f32 / 2.0).ceil() as i32
+                                    let is_at_left = geom.x == screen.x;
+                                    let is_at_right = (geom.x + geom.w) == (screen.x + screen.w);
+                                    let is_at_top = geom.y == screen.y;
+                                    let is_at_bottom = (geom.y + geom.h) == (screen.y + screen.h);
+
+                                    let (off_l, off_r, off_t, off_b) =
+                                        if is_smart && window_count <= 1 {
+                                            (0, 0, 0, 0)
+                                        } else {
+                                            let half = (gaps_val as f32 / 2.0).ceil() as i32;
+                                            let full = gaps_val as i32;
+                                            (
+                                                if is_at_left { full } else { half },
+                                                if is_at_right { full } else { half },
+                                                if is_at_top { full } else { half },
+                                                if is_at_bottom { full } else { half },
+                                            )
+                                        };
+
+                                    // --- 【应用动画坐标和裁剪】 ---
+                                    let target_geo = crate::wm::layout::Geometry {
+                                        x: geom.x + off_l,
+                                        y: geom.y + off_t,
+                                        w: (geom.w - off_l - off_r).max(1),
+                                        h: (geom.h - off_t - off_b).max(1),
                                     };
 
-                                    let off_t = if is_smart && window_count <= 1 {
-                                        0
-                                    } else if geom.y == screen.y {
-                                        gaps_val as i32
+                                    let current_geo = if is_animating {
+                                        let start = w_data.anim_start_geo.unwrap_or(target_geo);
+                                        crate::wm::animation::interpolate_geo(
+                                            start,
+                                            target_geo,
+                                            anim_progress,
+                                        )
                                     } else {
-                                        (gaps_val as f32 / 2.0).ceil() as i32
+                                        target_geo
                                     };
 
-                                    node.set_position(geom.x + off_l, geom.y + off_t);
+                                    // 1. 设置动画帧坐标
+                                    node.set_position(current_geo.x, current_geo.y);
+
+                                    // 2. 设置越界裁剪（防止挤占其他显示器）
+                                    if is_animating {
+                                        let (cx, cy, cw, ch) =
+                                            crate::wm::animation::calculate_clip_box(
+                                                current_geo,
+                                                out_data.usable_area,
+                                                border_val as i32,
+                                            );
+                                        w_data.window.set_clip_box(cx, cy, cw, ch);
+                                    } else {
+                                        w_data.window.set_clip_box(0, 0, 0, 0); // 结束动画，关闭裁剪
+                                    }
+                                    // --- 【结束】 ---
                                     if state.focused_window.as_ref() == Some(&window.id()) {
                                         node.place_top();
                                     }
@@ -913,7 +1113,26 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                         if let Some(node) = &w_data.node {
                             // 设置位置 (从 float_geo 读取)
-                            node.set_position(w_data.float_geo.x, w_data.float_geo.y);
+                            let target_geo = w_data.float_geo;
+                            let is_interactive = state.pointer_op_mode != PointerOpMode::None
+                                && state.pointer_op_target.as_ref() == Some(&w_data.id);
+
+                            let current_geo = if is_animating && !is_interactive {
+                                let start = w_data.anim_start_geo.unwrap_or(target_geo);
+                                crate::wm::animation::interpolate_geo(
+                                    start,
+                                    target_geo,
+                                    anim_progress,
+                                )
+                            } else {
+                                target_geo
+                            };
+
+                            node.set_position(current_geo.x, current_geo.y);
+
+                            // 悬浮窗通常可以超出边界，但如果为了视觉干净也可以裁剪
+                            // 暂不裁剪悬浮窗，让它保持自由
+                            w_data.window.set_clip_box(0, 0, 0, 0);
 
                             // 【关键】悬浮窗口必须盖在平铺窗口上面
                             node.place_top();
@@ -1484,12 +1703,35 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
             }
             // --- Dimensions 处理逻辑 ---
             WinEvent::Dimensions { width, height } => {
+                // --- 【获取全局动画状态】 ---
+                let mut is_animating = false;
+                let anim_enabled = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.enable.as_deref())
+                    .unwrap_or("true")
+                    == "true";
+                let anim_duration = state
+                    .config
+                    .animations
+                    .as_ref()
+                    .and_then(|a| a.duration.as_deref())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(150);
+                if anim_enabled {
+                    if let Some(start_time) = state.anim_start_time {
+                        if (start_time.elapsed().as_millis() as u64) < anim_duration {
+                            is_animating = true; // 正在动画中！
+                        }
+                    }
+                }
+
                 if let Some(w_idx) = state.windows.iter().position(|w| w.id == proxy.id()) {
                     let w = &mut state.windows[w_idx];
 
                     // --- 1. 全屏窗口处理 ---
                     if w.is_fullscreen {
-                        // 找出它所在显示器的真实全屏尺寸
                         let mut expected_w = 0;
                         let mut expected_h = 0;
                         if let Some(out_name) = &w.output {
@@ -1499,12 +1741,13 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             }
                         }
 
-                        // 如果全屏窗口由于缩放 Bug 报出了错误尺寸，强制触发焦点脉冲唤醒它
                         if expected_w > 0 && expected_h > 0 {
                             let dw = (width as i32 - expected_w).abs();
                             let dh = (height as i32 - expected_h).abs();
 
                             if dw > 2 || dh > 2 {
+                                // 全屏窗口的尺寸是瞬间完成的，没有中间过渡帧。
+                                // 只要它报的不是物理满屏尺寸，立刻启动心脏除颤，决不能等动画结束！
                                 if w.layout_retry_count < 3 {
                                     w.layout_retry_count += 1;
                                     if let Some(wm) = &state.river_wm {
@@ -1520,12 +1763,12 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                     // --- 2. 悬浮窗口处理 ---
                     if w.is_floating {
-                        // 悬浮窗口是自由的，我们无条件信任客户端汇报的尺寸。
-                        // 避免和应用的宽高比 (Aspect Ratio) 发生冲突。
-                        w.float_geo.w = width as i32;
-                        w.float_geo.h = height as i32;
-
-                        // 确保清零重试计数器！防止残留的数值干扰后续的全屏切换！
+                        // --- 【悬浮窗纯净逻辑 + 动画免疫】 ---
+                        // 如果正在播放动画，绝对不能用客户端返回的中间过渡尺寸覆盖我们的目标 float_geo
+                        if !is_animating {
+                            w.float_geo.w = width as i32;
+                            w.float_geo.h = height as i32;
+                        }
                         w.layout_retry_count = 0;
                         return;
                     }
@@ -1537,14 +1780,20 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             let dh = (height as i32 - geo.h).abs();
 
                             if dw > 2 || dh > 2 {
-                                if w.layout_retry_count < 3 {
-                                    w.layout_retry_count += 1;
-                                    if let Some(wm) = &state.river_wm {
-                                        wm.manage_dirty();
+                                // --- 【加上 !is_animating 免疫盾】 ---
+                                if !is_animating {
+                                    if w.layout_retry_count < 3 {
+                                        w.layout_retry_count += 1;
+                                        if let Some(wm) = &state.river_wm {
+                                            wm.manage_dirty();
+                                        }
+                                    } else if w.layout_retry_count == 50 {
+                                        warn!(
+                                            "-> Window {:?} refuses to accept layout geometry.",
+                                            proxy.id()
+                                        );
+                                        w.layout_retry_count += 1;
                                     }
-                                } else if w.layout_retry_count == 50 {
-                                    warn!("-> Window {:?} refuses to accept layout geometry, giving up enforcement.", proxy.id());
-                                    w.layout_retry_count += 1;
                                 }
                             } else {
                                 w.layout_retry_count = 0;

@@ -259,6 +259,7 @@ rrwm
         ├── mod.rs       # Core logic: AppState definition, Dispatch implementations
         ├── layout.rs    # Layout engine: BSP tree, Cosmic tiling algorithm, recursive insertion/deletion
         ├── actions.rs   # Action system: IPC broadcasting, focus finding, cross-tag movement logic
+        ├── animation.rs # Animation Calculation Engine
         └── binds.rs     # Input mapping: Parses config and registers XKB binding objects
 ```
 ## License

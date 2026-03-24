@@ -33,6 +33,12 @@ pub struct WaybarConfig {
     pub empty_style: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct AnimationsConfig {
+    pub enable: Option<String>,
+    pub duration: Option<String>,
+}
+
 // 1. 对应 [input.keyboard] 部分
 #[derive(Deserialize, Debug, Clone)]
 pub struct KeyboardConfig {
@@ -123,6 +129,7 @@ pub struct Config {
     pub pointer: Option<HashMap<String, KeyBindingEntry>>,
     pub resize: Option<HashMap<String, KeyBindingEntry>>,
     pub waybar: Option<WaybarConfig>,
+    pub animations: Option<AnimationsConfig>,
     pub output: Option<HashMap<String, OutputConfig>>,
     pub window: Option<WindowConfig>,
 }
@@ -168,6 +175,7 @@ impl Config {
             resize: None,
             pointer: None,
             waybar: None,
+            animations: None,
             output: None,
             window: None,
         }
