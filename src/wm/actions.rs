@@ -1602,7 +1602,7 @@ impl AppState {
         for rule in rules {
             // 忽略大小写
             if app_id.to_lowercase().contains(&rule.appid.to_lowercase()) {
-                return Some(rule.icon.clone());
+                return rule.icon.clone(); 
             }
         }
 
