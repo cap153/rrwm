@@ -1417,6 +1417,25 @@ impl AppState {
             Action::FocusTag(mask) => {
                 // 逻辑：修改“当前活跃显示器”的真值
                 if let Some(out_id) = &self.focused_output {
+                    // 我们需要先获取到旧的 tags，才能比较是否发生了变化
+                    let mut old_tags = 0;
+                    if let Some(out_data) = self.outputs.get(out_id) {
+                        old_tags = out_data.tags;
+                    }
+
+                    if old_tags != mask && old_tags != 0 {
+                        // 记录旧面具
+                        self.tag_anim_old_mask = old_tags;
+
+                        // 通过二进制的 trailing_zeros 计算索引 (0~31) 比较大小，得出滑动方向
+                        let old_idx = old_tags.trailing_zeros();
+                        let new_idx = mask.trailing_zeros();
+                        self.tag_anim_direction = Some(if new_idx > old_idx {
+                            Direction::Right // 目标在右边，镜头向右平移（窗口向左滑）
+                        } else {
+                            Direction::Left // 目标在左边，镜头向左平移（窗口向右滑）
+                        });
+                    }
                     if let Some(out_data) = self.outputs.get_mut(out_id) {
                         info!(
                             "-> [Action] Switch the label of monitor {:?} to: {:b}",
@@ -2116,6 +2135,10 @@ impl AppState {
                 current_idx + 1,
                 next_idx + 1
             );
+
+            // --- 【记录旧 Tag 和滑动方向】 ---
+            self.tag_anim_old_mask = current_tags;
+            self.tag_anim_direction = Some(dir);
 
             if let Some(out_data) = self.outputs.get_mut(&out_id) {
                 out_data.tags = next_mask;

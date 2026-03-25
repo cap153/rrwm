@@ -120,6 +120,8 @@ fn main() {
         pending_op_end: false,
         minimized_slots: HashMap::new(),
         anim_start_time: None,
+        tag_anim_direction: None,
+        tag_anim_old_mask: 0,
     };
 
     let _registry = display.get_registry(&qh, ());

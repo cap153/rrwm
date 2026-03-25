@@ -182,6 +182,8 @@ pub struct AppState {
     pub pending_op_end: bool,
     pub minimized_slots: HashMap<String, wayland_backend::client::ObjectId>,
     pub anim_start_time: Option<Instant>,
+    pub tag_anim_direction: Option<crate::wm::layout::Direction>,
+    pub tag_anim_old_mask: u32,
 }
 
 // --- 1. 监听 WlRegistry (寻找全局接口) ---
@@ -551,6 +553,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(150);
 
+                // 只要有翻页意图，立刻引爆动画时钟
+                if state.tag_anim_direction.is_some() && state.anim_start_time.is_none() {
+                    state.anim_start_time = Some(std::time::Instant::now());
+                }
+
                 let mut anim_progress = 1.0;
                 let mut is_animating = false;
 
@@ -567,6 +574,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             state.anim_start_time = None; // 动画结束
                                                           // 动画结束瞬间，强制清空所有窗口的 last_proposed 记录。
                                                           // 这会逼迫下一帧发送最终的尺寸建议，从而在动画结束后触发一次真实的 Dimensions 检查。
+                                                          // --- 【清理 Tag 动画标记】 ---
+                            state.tag_anim_direction = None;
+                            state.tag_anim_old_mask = 0;
                             for w in &mut state.windows {
                                 w.last_proposed_w = 0;
                                 w.last_proposed_h = 0;
@@ -630,11 +640,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
                 // 3. 显隐控制：遍历所有窗口
+                let is_tag_animating = state.tag_anim_direction.is_some() && is_animating;
+
                 for w_data in &state.windows {
                     let is_visible = if let Some(win_out_id) = &w_data.output {
                         if let Some(out_data) = state.outputs.get(win_out_id) {
-                            // 窗口所属显示器正在看这个窗口的标签
-                            (w_data.tags & out_data.tags) != 0 && !w_data.is_minimized
+                            // 1. 是否属于当前正在看的 Tag
+                            let match_current = (w_data.tags & out_data.tags) != 0;
+                            // 2. 如果正在播放切页动画，旧 Tag 的窗口也必须保持可见！
+                            let match_old =
+                                is_tag_animating && (w_data.tags & state.tag_anim_old_mask) != 0;
+
+                            (match_current || match_old) && !w_data.is_minimized
                         } else {
                             false
                         }
@@ -645,7 +662,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     if is_visible {
                         w_data.window.show();
                     } else {
-                        w_data.window.hide(); // 最小化的窗口会在这里被死死按住
+                        w_data.window.hide();
                     }
                 }
 
@@ -675,179 +692,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                // 5. 布局计算：遍历所有显示器，各算各的树
-                state.last_geometry.clear(); // 清空旧的几何记录，准备重新记录
+                // 5. 布局计算
+                state.last_geometry.clear();
 
-                // 这里不再用 .next()，而是迭代所有的 outputs
-                for (out_id, out_data) in &state.outputs {
-                    let tree_key = (out_id.clone(), out_data.tags);
-                    if let Some(root) = state.layout_roots.get(&tree_key) {
-                        let mut results = Vec::new();
-                        calculate_layout(root, out_data.usable_area, &mut results);
-
-                        // --- A. 解析配置并进行“固若金汤”的约束检查 ---
-                        let win_cfg = state.config.window.as_ref();
-                        let border_cfg = win_cfg
-                            .and_then(|c| c.active.as_ref())
-                            .and_then(|a| a.border.as_ref());
-
-                        let border_val = border_cfg
-                            .and_then(|b| b.width.parse::<u32>().ok())
-                            .unwrap_or(0);
-                        let mut gaps_val = win_cfg
-                            .and_then(|c| c.gaps.as_ref())
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(0);
-
-                        if gaps_val < border_val {
-                            warn!("-> [Config] gaps ({}) is smaller than border width ({}). Forcing gaps to match border.", gaps_val, border_val);
-                            gaps_val = border_val;
-                        }
-
-                        // --- 根据模式决定边框颜色 ---
-                        let normal_color_str =
-                            border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
-                        let resize_color_str = border_cfg
-                            .and_then(|b| b.resize_color.as_deref())
-                            .unwrap_or("#ff0000"); // 默认红色
-
-                        // 如果处于 Resize 模式，使用 resize_color，否则使用 normal_color
-                        let target_color_str = if state.is_resize_mode {
-                            resize_color_str
-                        } else {
-                            normal_color_str
-                        };
-                        let (br, bg, bb, ba) = Self::parse_color(target_color_str);
-                        let is_smart = win_cfg
-                            .map(|c| c.smart_borders.to_lowercase() == "true")
-                            .unwrap_or(false);
-                        let window_count = results.len();
-
-                        for (window, geom) in results {
-                            if let Some(w_data) =
-                                state.windows.iter_mut().find(|w| w.id == window.id())
-                            {
-                                let is_focused =
-                                    state.focused_window.as_ref() == Some(&window.id());
-
-                                // --- B. 边界感应逻辑 ---
-                                // 判定四个方向是否贴着屏幕边缘（out_data.usable_area）
-                                let screen = out_data.usable_area;
-                                let is_at_left = geom.x == screen.x;
-                                let is_at_right = (geom.x + geom.w) == (screen.x + screen.w);
-                                let is_at_top = geom.y == screen.y;
-                                let is_at_bottom = (geom.y + geom.h) == (screen.y + screen.h);
-
-                                // --- C. 计算四个方向的独立偏移量 ---
-                                // 逻辑：边缘设为 gaps_val，中间设为 gaps_val / 2
-                                // 如果开启 smart_borders 且只有一个窗口，全部设为 0
-                                let (off_l, off_r, off_t, off_b) = if is_smart && window_count <= 1
-                                {
-                                    (0, 0, 0, 0)
-                                } else {
-                                    let half = (gaps_val as f32 / 2.0).ceil() as i32;
-                                    let full = gaps_val as i32;
-                                    (
-                                        if is_at_left { full } else { half },
-                                        if is_at_right { full } else { half },
-                                        if is_at_top { full } else { half },
-                                        if is_at_bottom { full } else { half },
-                                    )
-                                };
-
-                                // --- D. 执行渲染与布局存入 ---
-                                let current_border =
-                                    if is_focused && !(is_smart && window_count <= 1) {
-                                        border_val as i32
-                                    } else {
-                                        0
-                                    };
-
-                                window.set_borders(
-                                    crate::protocol::river_wm::river_window_v1::Edges::all(),
-                                    current_border,
-                                    br,
-                                    bg,
-                                    bb,
-                                    ba,
-                                );
-
-                                // 计算缩进后的内容尺寸（注意：边框是画在缩进空间内的，所以要减去边框宽度）
-                                let final_w = (geom.w - off_l - off_r).max(1);
-                                let final_h = (geom.h - off_t - off_b).max(1);
-
-                                // 组装目标几何体 (Target Geometry)
-                                let target_geo = crate::wm::layout::Geometry {
-                                    x: geom.x + off_l,
-                                    y: geom.y + off_t,
-                                    w: final_w,
-                                    h: final_h,
-                                };
-
-                                // 探测是否发生了布局改变 (比如新增了窗口、焦点切换导致边框改变)
-                                let geo_changed = w_data
-                                    .anim_target_geo
-                                    .map(|g| {
-                                        g.x != target_geo.x
-                                            || g.y != target_geo.y
-                                            || g.w != target_geo.w
-                                            || g.h != target_geo.h
-                                    })
-                                    .unwrap_or(true);
-
-                                if geo_changed {
-                                    // 发生改变！将当前的进度存为新起点，触发动画
-                                    w_data.anim_start_geo =
-                                        w_data.anim_target_geo.or(Some(target_geo));
-                                    w_data.anim_target_geo = Some(target_geo);
-                                    if anim_enabled {
-                                        state.anim_start_time = Some(std::time::Instant::now());
-                                        is_animating = true;
-                                        anim_progress = 0.0;
-                                    }
-                                }
-
-                                // 插值计算这一帧应该多大
-                                let (propose_w, propose_h) = if is_animating {
-                                    let start = w_data.anim_start_geo.unwrap_or(target_geo);
-                                    let current = crate::wm::animation::interpolate_geo(
-                                        start,
-                                        target_geo,
-                                        anim_progress,
-                                    );
-                                    (current.w, current.h)
-                                } else {
-                                    (target_geo.w, target_geo.h)
-                                };
-
-                                // 存入 last_geometry 供重试判定使用 (这里必须存最终目标)
-                                state.last_geometry.insert(
-                                    window.id(),
-                                    crate::wm::layout::Geometry {
-                                        x: geom.x,
-                                        y: geom.y,
-                                        w: final_w,
-                                        h: final_h,
-                                    },
-                                );
-
-                                if w_data.last_proposed_w != propose_w
-                                    || w_data.last_proposed_h != propose_h
-                                    || w_data.layout_retry_count > 0
-                                {
-                                    window.propose_dimensions(propose_w, propose_h);
-                                    w_data.last_proposed_w = propose_w;
-                                    w_data.last_proposed_h = propose_h;
-                                }
-                                window.set_tiled(
-                                    crate::protocol::river_wm::river_window_v1::Edges::all(),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // --- 悬浮窗口处理 (Floating Windows) ---
+                // --- 【统一解析配置，供平铺和悬浮共享】 ---
                 let win_cfg = state.config.window.as_ref();
                 let border_cfg = win_cfg
                     .and_then(|c| c.active.as_ref())
@@ -855,11 +703,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let border_val = border_cfg
                     .and_then(|b| b.width.parse::<u32>().ok())
                     .unwrap_or(0);
+                let mut gaps_val = win_cfg
+                    .and_then(|c| c.gaps.as_ref())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if gaps_val < border_val {
+                    gaps_val = border_val;
+                }
+
                 let normal_color_str = border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
                 let resize_color_str = border_cfg
                     .and_then(|b| b.resize_color.as_deref())
-                    .unwrap_or("#ff0000"); // 默认红色
-
+                    .unwrap_or("#ff0000");
                 let target_color_str = if state.is_resize_mode {
                     resize_color_str
                 } else {
@@ -867,12 +722,190 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 };
                 let (br, bg, bb, ba) = Self::parse_color(target_color_str);
 
+                let is_smart = win_cfg
+                    .map(|c| c.smart_borders.to_lowercase() == "true")
+                    .unwrap_or(false);
+
+                // --- 渲染平铺层 (Tiling Layer) ---
+                let is_tag_animating = state.tag_anim_direction.is_some() && is_animating;
+
+                for (out_id, out_data) in &state.outputs {
+                    // 双树同跑逻辑
+                    let mut active_trees = vec![out_data.tags];
+                    if is_tag_animating
+                        && state.tag_anim_old_mask != 0
+                        && state.tag_anim_old_mask != out_data.tags
+                    {
+                        active_trees.push(state.tag_anim_old_mask);
+                    }
+
+                    for render_tag in active_trees {
+                        let tree_key = (out_id.clone(), render_tag);
+                        if let Some(root) = state.layout_roots.get(&tree_key) {
+                            let mut results = Vec::new();
+                            calculate_layout(root, out_data.usable_area, &mut results);
+                            let window_count = results.len();
+
+                            for (window, geom) in results {
+                                if let Some(w_data) =
+                                    state.windows.iter_mut().find(|w| w.id == window.id())
+                                {
+                                    // 防重影
+                                    if render_tag == state.tag_anim_old_mask
+                                        && (w_data.tags & out_data.tags) != 0
+                                    {
+                                        continue;
+                                    }
+
+                                    let is_focused =
+                                        state.focused_window.as_ref() == Some(&window.id());
+
+                                    // 计算四个方向的独立偏移量
+                                    let screen = out_data.usable_area;
+                                    let is_at_left = geom.x == screen.x;
+                                    let is_at_right = (geom.x + geom.w) == (screen.x + screen.w);
+                                    let is_at_top = geom.y == screen.y;
+                                    let is_at_bottom = (geom.y + geom.h) == (screen.y + screen.h);
+
+                                    let (off_l, off_r, off_t, off_b) =
+                                        if is_smart && window_count <= 1 {
+                                            (0, 0, 0, 0)
+                                        } else {
+                                            let half = (gaps_val as f32 / 2.0).ceil() as i32;
+                                            let full = gaps_val as i32;
+                                            (
+                                                if is_at_left { full } else { half },
+                                                if is_at_right { full } else { half },
+                                                if is_at_top { full } else { half },
+                                                if is_at_bottom { full } else { half },
+                                            )
+                                        };
+
+                                    // 设置边框
+                                    let current_border =
+                                        if is_focused && !(is_smart && window_count <= 1) {
+                                            border_val as i32
+                                        } else {
+                                            0
+                                        };
+                                    window.set_borders(
+                                        crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                        current_border,
+                                        br,
+                                        bg,
+                                        bb,
+                                        ba,
+                                    );
+
+                                    // 计算缩进后的目标几何体
+                                    let final_w = (geom.w - off_l - off_r).max(1);
+                                    let final_h = (geom.h - off_t - off_b).max(1);
+
+                                    let target_geo = crate::wm::layout::Geometry {
+                                        x: geom.x + off_l,
+                                        y: geom.y + off_t,
+                                        w: final_w,
+                                        h: final_h,
+                                    };
+
+                                    // 动画滑动坐标算子
+                                    let mut actual_start_geo = target_geo;
+                                    let mut actual_target_geo = target_geo;
+
+                                    if is_tag_animating {
+                                        let is_old_tag =
+                                            (w_data.tags & state.tag_anim_old_mask) != 0;
+                                        let is_new_tag = (w_data.tags & out_data.tags) != 0;
+
+                                        let offset_x = match state.tag_anim_direction.unwrap() {
+                                            crate::wm::layout::Direction::Right => {
+                                                out_data.usable_area.w
+                                            }
+                                            crate::wm::layout::Direction::Left => {
+                                                -out_data.usable_area.w
+                                            }
+                                            _ => 0,
+                                        };
+
+                                        if is_old_tag && !is_new_tag {
+                                            actual_start_geo =
+                                                w_data.anim_target_geo.unwrap_or(target_geo);
+                                            actual_target_geo.x -= offset_x;
+                                        } else if is_new_tag && !is_old_tag {
+                                            actual_start_geo.x += offset_x;
+                                        }
+                                    }
+
+                                    let geo_changed = w_data
+                                        .anim_target_geo
+                                        .map(|g| {
+                                            g.x != actual_target_geo.x
+                                                || g.y != actual_target_geo.y
+                                                || g.w != actual_target_geo.w
+                                                || g.h != actual_target_geo.h
+                                        })
+                                        .unwrap_or(true);
+
+                                    if geo_changed {
+                                        if is_tag_animating {
+                                            w_data.anim_start_geo = Some(actual_start_geo);
+                                        } else {
+                                            w_data.anim_start_geo =
+                                                w_data.anim_target_geo.or(Some(actual_start_geo));
+                                        }
+                                        w_data.anim_target_geo = Some(actual_target_geo);
+                                        if anim_enabled {
+                                            state.anim_start_time = Some(std::time::Instant::now());
+                                            is_animating = true;
+                                            anim_progress = 0.0;
+                                            if let Some(wm) = &state.river_wm { wm.manage_dirty(); }
+                                        }
+                                    }
+
+                                    let (propose_w, propose_h) = if is_animating {
+                                        let start =
+                                            w_data.anim_start_geo.unwrap_or(actual_target_geo);
+                                        let current = crate::wm::animation::interpolate_geo(
+                                            start,
+                                            actual_target_geo,
+                                            anim_progress,
+                                        );
+                                        (current.w, current.h)
+                                    } else {
+                                        (actual_target_geo.w, actual_target_geo.h)
+                                    };
+
+                                    state.last_geometry.insert(
+                                        window.id(),
+                                        crate::wm::layout::Geometry {
+                                            x: geom.x,
+                                            y: geom.y,
+                                            w: final_w,
+                                            h: final_h,
+                                        },
+                                    );
+
+                                    if w_data.last_proposed_w != propose_w
+                                        || w_data.last_proposed_h != propose_h
+                                        || w_data.layout_retry_count > 0
+                                    {
+                                        window.propose_dimensions(propose_w, propose_h);
+                                        w_data.last_proposed_w = propose_w;
+                                        w_data.last_proposed_h = propose_h;
+                                    }
+                                    window.set_tiled(
+                                        crate::protocol::river_wm::river_window_v1::Edges::all(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- 悬浮窗口处理 (Floating Windows) ---
                 for w_data in state.windows.iter_mut() {
                     if w_data.is_floating && !w_data.is_minimized {
-                        // --- 【替换开始：植入动画插值计算】 ---
                         let target_geo = w_data.float_geo;
-
-                        // 特例：如果是用户在用鼠标拖拽，绝对不能加动画！必须零延迟跟手！
                         let is_interactive = state.pointer_op_mode != PointerOpMode::None
                             && state.pointer_op_target.as_ref() == Some(&w_data.id);
 
@@ -895,10 +928,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     state.anim_start_time = Some(std::time::Instant::now());
                                     is_animating = true;
                                     anim_progress = 0.0;
+                                    if let Some(wm) = &state.river_wm { wm.manage_dirty(); }
                                 }
                             }
                             w_data.anim_target_geo = Some(target_geo);
                         }
+
                         let (propose_w, propose_h) = if is_animating && !is_interactive {
                             let start = w_data.anim_start_geo.unwrap_or(target_geo);
                             let current = crate::wm::animation::interpolate_geo(
@@ -920,10 +955,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             w_data.last_proposed_h = propose_h;
                         }
 
-                        // 2. 设置边框, 沿用聚焦/非聚焦的颜色逻辑
                         let is_focused = state.focused_window.as_ref() == Some(&w_data.id);
-
-                        // 悬浮窗口不受 Gaps/SmartBorders 影响，始终显示配置的边框宽度
                         if is_focused {
                             w_data.window.set_borders(
                                 crate::protocol::river_wm::river_window_v1::Edges::all(),
@@ -940,11 +972,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                 49,
                                 50,
                                 68,
-                                255, // 默认深色
+                                255,
                             );
                         }
-
-                        // 3. 标记状态, 告诉窗口它不再是平铺状态 (Edges::none()), 这样客户端可能会绘制阴影或圆角
                         w_data
                             .window
                             .set_tiled(crate::protocol::river_wm::river_window_v1::Edges::empty());
@@ -982,7 +1012,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 proxy.manage_finish();
             }
             WmEvent::RenderStart => {
-                // --- 【全局动画时钟同步】 ---
+                // --- 【统一解析配置】 ---
                 let win_cfg = state.config.window.as_ref();
                 let anim_enabled = state
                     .config
@@ -1003,22 +1033,23 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let mut is_animating = false;
                 if anim_enabled {
                     if let Some(start_time) = state.anim_start_time {
-                        let elapsed = start_time.elapsed().as_millis() as u64;
-                        if elapsed < anim_duration {
-                            anim_progress = elapsed as f32 / anim_duration as f32;
+                        if (start_time.elapsed().as_millis() as u64) < anim_duration {
+                            anim_progress =
+                                start_time.elapsed().as_millis() as f32 / anim_duration as f32;
                             is_animating = true;
                         }
                     }
                 }
-                // ==========================================
+
+                let border_cfg = win_cfg
+                    .and_then(|c| c.active.as_ref())
+                    .and_then(|a| a.border.as_ref());
+                let border_val = border_cfg
+                    .and_then(|b| b.width.parse::<u32>().ok())
+                    .unwrap_or(0);
                 let mut gaps_val = win_cfg
                     .and_then(|c| c.gaps.as_ref())
                     .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let border_val = win_cfg
-                    .and_then(|c| c.active.as_ref())
-                    .and_then(|a| a.border.as_ref())
-                    .and_then(|b| b.width.parse::<u32>().ok())
                     .unwrap_or(0);
                 if gaps_val < border_val {
                     gaps_val = border_val;
@@ -1026,93 +1057,131 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 let is_smart = win_cfg
                     .map(|c| c.smart_borders.to_lowercase() == "true")
                     .unwrap_or(false);
-                // 1. 渲染平铺层 (Tiling Layer)
+
+                let is_tag_animating = state.tag_anim_direction.is_some() && is_animating;
+
+                // 1. 渲染平铺层
                 for (out_name, out_data) in &state.outputs {
-                    let tree_key = (out_name.clone(), out_data.tags);
-                    if let Some(root) = state.layout_roots.get(&tree_key) {
-                        let mut results = Vec::new();
-                        calculate_layout(root, out_data.usable_area, &mut results);
-                        let window_count = results.len();
+                    let mut active_trees = vec![out_data.tags];
+                    if is_tag_animating
+                        && state.tag_anim_old_mask != 0
+                        && state.tag_anim_old_mask != out_data.tags
+                    {
+                        active_trees.push(state.tag_anim_old_mask);
+                    }
 
-                        for (window, geom) in results {
-                            if let Some(w_data) =
-                                state.windows.iter_mut().find(|w| w.id == window.id())
-                            {
-                                if w_data.node.is_none() {
-                                    w_data.node = Some(window.get_node(qh, ()));
-                                }
-                                if let Some(node) = &w_data.node {
-                                    let screen = out_data.usable_area;
-                                    let is_at_left = geom.x == screen.x;
-                                    let is_at_right = (geom.x + geom.w) == (screen.x + screen.w);
-                                    let is_at_top = geom.y == screen.y;
-                                    let is_at_bottom = (geom.y + geom.h) == (screen.y + screen.h);
+                    for render_tag in active_trees {
+                        let tree_key = (out_name.clone(), render_tag);
+                        if let Some(root) = state.layout_roots.get(&tree_key) {
+                            let mut results = Vec::new();
+                            calculate_layout(root, out_data.usable_area, &mut results);
+                            let window_count = results.len();
 
-                                    let (off_l, off_r, off_t, off_b) =
-                                        if is_smart && window_count <= 1 {
-                                            (0, 0, 0, 0)
-                                        } else {
-                                            let half = (gaps_val as f32 / 2.0).ceil() as i32;
-                                            let full = gaps_val as i32;
-                                            (
-                                                if is_at_left { full } else { half },
-                                                if is_at_right { full } else { half },
-                                                if is_at_top { full } else { half },
-                                                if is_at_bottom { full } else { half },
-                                            )
+                            for (window, geom) in results {
+                                if let Some(w_data) =
+                                    state.windows.iter_mut().find(|w| w.id == window.id())
+                                {
+                                    if render_tag == state.tag_anim_old_mask
+                                        && (w_data.tags & out_data.tags) != 0
+                                    {
+                                        continue;
+                                    }
+
+                                    if w_data.node.is_none() {
+                                        w_data.node = Some(window.get_node(qh, ()));
+                                    }
+                                    if let Some(node) = &w_data.node {
+                                        let screen = out_data.usable_area;
+                                        let is_at_left = geom.x == screen.x;
+                                        let is_at_right =
+                                            (geom.x + geom.w) == (screen.x + screen.w);
+                                        let is_at_top = geom.y == screen.y;
+                                        let is_at_bottom =
+                                            (geom.y + geom.h) == (screen.y + screen.h);
+
+                                        let (off_l, off_r, off_t, off_b) =
+                                            if is_smart && window_count <= 1 {
+                                                (0, 0, 0, 0)
+                                            } else {
+                                                let half = (gaps_val as f32 / 2.0).ceil() as i32;
+                                                let full = gaps_val as i32;
+                                                (
+                                                    if is_at_left { full } else { half },
+                                                    if is_at_right { full } else { half },
+                                                    if is_at_top { full } else { half },
+                                                    if is_at_bottom { full } else { half },
+                                                )
+                                            };
+
+                                        let target_geo = crate::wm::layout::Geometry {
+                                            x: geom.x + off_l,
+                                            y: geom.y + off_t,
+                                            w: (geom.w - off_l - off_r).max(1),
+                                            h: (geom.h - off_t - off_b).max(1),
                                         };
 
-                                    // --- 【应用动画坐标和裁剪】 ---
-                                    let target_geo = crate::wm::layout::Geometry {
-                                        x: geom.x + off_l,
-                                        y: geom.y + off_t,
-                                        w: (geom.w - off_l - off_r).max(1),
-                                        h: (geom.h - off_t - off_b).max(1),
-                                    };
+                                        let mut actual_target_geo = target_geo;
+                                        if is_tag_animating {
+                                            let is_old_tag =
+                                                (w_data.tags & state.tag_anim_old_mask) != 0;
+                                            let is_new_tag = (w_data.tags & out_data.tags) != 0;
+                                            let offset_x = match state.tag_anim_direction.unwrap() {
+                                                crate::wm::layout::Direction::Right => {
+                                                    out_data.usable_area.w
+                                                }
+                                                crate::wm::layout::Direction::Left => {
+                                                    -out_data.usable_area.w
+                                                }
+                                                _ => 0,
+                                            };
+                                            if is_old_tag && !is_new_tag {
+                                                actual_target_geo.x -= offset_x;
+                                            }
+                                        }
 
-                                    let current_geo = if is_animating {
-                                        let start = w_data.anim_start_geo.unwrap_or(target_geo);
-                                        crate::wm::animation::interpolate_geo(
-                                            start,
-                                            target_geo,
-                                            anim_progress,
-                                        )
-                                    } else {
-                                        target_geo
-                                    };
+                                        let current_geo = if is_animating {
+                                            let start =
+                                                w_data.anim_start_geo.unwrap_or(actual_target_geo);
+                                            crate::wm::animation::interpolate_geo(
+                                                start,
+                                                actual_target_geo,
+                                                anim_progress,
+                                            )
+                                        } else {
+                                            actual_target_geo
+                                        };
 
-                                    // 1. 设置动画帧坐标
-                                    node.set_position(current_geo.x, current_geo.y);
+                                        node.set_position(current_geo.x, current_geo.y);
 
-                                    // 2. 设置越界裁剪（防止挤占其他显示器）
-                                    if is_animating {
-                                        let (cx, cy, cw, ch) =
-                                            crate::wm::animation::calculate_clip_box(
-                                                current_geo,
-                                                out_data.usable_area,
-                                                border_val as i32,
-                                            );
-                                        w_data.window.set_clip_box(cx, cy, cw, ch);
-                                    } else {
-                                        w_data.window.set_clip_box(0, 0, 0, 0); // 结束动画，关闭裁剪
-                                    }
-                                    // --- 【结束】 ---
-                                    if state.focused_window.as_ref() == Some(&window.id()) {
-                                        node.place_top();
+                                        if is_animating {
+                                            let (cx, cy, cw, ch) =
+                                                crate::wm::animation::calculate_clip_box(
+                                                    current_geo,
+                                                    out_data.usable_area,
+                                                    border_val as i32,
+                                                );
+                                            w_data.window.set_clip_box(cx, cy, cw, ch);
+                                        } else {
+                                            w_data.window.set_clip_box(0, 0, 0, 0);
+                                        }
+
+                                        if state.focused_window.as_ref() == Some(&window.id()) {
+                                            node.place_top();
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-                // 2. 渲染悬浮层 (Floating Layer)
+
+                // 2. 渲染悬浮层
                 for w_data in &mut state.windows {
                     if w_data.is_floating && !w_data.is_minimized {
                         if w_data.node.is_none() {
                             w_data.node = Some(w_data.window.get_node(qh, ()));
                         }
                         if let Some(node) = &w_data.node {
-                            // 设置位置 (从 float_geo 读取)
                             let target_geo = w_data.float_geo;
                             let is_interactive = state.pointer_op_mode != PointerOpMode::None
                                 && state.pointer_op_target.as_ref() == Some(&w_data.id);
@@ -1129,18 +1198,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             };
 
                             node.set_position(current_geo.x, current_geo.y);
-
-                            // 悬浮窗通常可以超出边界，但如果为了视觉干净也可以裁剪
-                            // 暂不裁剪悬浮窗，让它保持自由
                             w_data.window.set_clip_box(0, 0, 0, 0);
 
-                            // 【关键】悬浮窗口必须盖在平铺窗口上面
                             node.place_top();
                         }
                     }
                 }
 
-                // 3. 焦点层 (Focus Layer) 只要是当前焦点，就必须在最最上面
+                // 3. 焦点层霸权
                 if let Some(f_id) = &state.focused_window {
                     if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
                         if let Some(node) = &w_data.node {
