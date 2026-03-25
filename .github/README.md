@@ -57,7 +57,7 @@ My configuration is here: [https://github.com/cap153/config/tree/main/river/.con
 ```toml
 # ~/.config/river/rrwm.toml
 
-[input.keyboard]
+[input.keyboard] # Note: This configuration option requires logging out and back in, or restarting, to take effect.
 layout = "us"
 variant = "colemak" # Default is qwerty
 options = "caps:swapescape" # Supports multiple options, separated by commas
@@ -83,6 +83,10 @@ tag_icons = ["", "", "", "", "󰃽", "󰊢", "", "󰙯", "", "
 focused_style = "<span color='#bd93f9'>"
 occupied_style = "<span color='#6C7086'>"
 empty_style = "<span color='#313244'>"
+
+[animations]
+enable = "true" # Animation enabled by default
+duration = "150" # Animation transition time
 
 [window]
 smart_borders = "true" # Borders/gaps disappear when only one window is present

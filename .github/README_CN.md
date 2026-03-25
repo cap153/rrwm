@@ -51,7 +51,7 @@ rrwm [选项]
 ```toml
 # ~/.config/river/rrwm.toml
 
-[input.keyboard]
+[input.keyboard] # 注意：此配置选项需要注销并重新登录或重新启动才能生效。
 layout = "us"
 variant = "colemak" # 默认qwerty
 options = "caps:swapescape" # 支持多个选项，用英文逗号隔开
@@ -77,6 +77,10 @@ tag_icons = ["", "", "", "", "󰃽", "󰊢", "", "󰙯", "", "
 focused_style = "<span color='#bd93f9'>"
 occupied_style = "<span color='#6C7086'>"
 empty_style = "<span color='#313244'>"
+
+[animations]
+enable = "true" # 默认开启动画
+duration = "150" # 动画的过渡时间
 
 [window]
 smart_borders = "true" # 只有一个窗口时边框/间隙消失
