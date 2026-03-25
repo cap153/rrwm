@@ -1,4 +1,8 @@
+A window manager based on [river](https://codeberg.org/river/river) >= 0.4.x, written in Rust
+
 ![preview](preview.png) 
+
+https://github.com/user-attachments/assets/c711d157-920f-4586-ba03-90476dc7ac16
 
 [中文README](README_CN.md)
 
