@@ -111,6 +111,7 @@ pub struct WindowData {
     pub is_minimized: bool,
     pub anim_start_geo: Option<Geometry>,
     pub anim_target_geo: Option<Geometry>,
+    pub current_visual_geo: Option<Geometry>,
 }
 
 pub struct ModeInfo {
@@ -285,6 +286,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     is_minimized: false,
                     anim_start_geo: None,
                     anim_target_geo: None,
+                    current_visual_geo: None,
                 });
             }
             WmEvent::ManageStart => {
@@ -544,7 +546,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     .as_ref()
                     .and_then(|a| a.enable.as_deref())
                     .unwrap_or("true")
-                    == "true";
+                    == "true"
+                    && !state.is_resize_mode; // 在 Resize 模式下强制禁用动画，保证跟手率
                 let anim_duration = state
                     .config
                     .animations
@@ -580,6 +583,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             for w in &mut state.windows {
                                 w.last_proposed_w = 0;
                                 w.last_proposed_h = 0;
+                                w.anim_start_geo = w.anim_target_geo; // 动画自然结束时，必须同步起点
                             }
                             if let Some(wm) = &state.river_wm {
                                 wm.manage_dirty();
@@ -850,15 +854,19 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         if is_tag_animating {
                                             w_data.anim_start_geo = Some(actual_start_geo);
                                         } else {
-                                            w_data.anim_start_geo =
-                                                w_data.anim_target_geo.or(Some(actual_start_geo));
+                                            w_data.anim_start_geo = w_data
+                                                .current_visual_geo
+                                                .or(w_data.anim_target_geo)
+                                                .or(Some(actual_start_geo));
                                         }
                                         w_data.anim_target_geo = Some(actual_target_geo);
                                         if anim_enabled {
                                             state.anim_start_time = Some(std::time::Instant::now());
                                             is_animating = true;
                                             anim_progress = 0.0;
-                                            if let Some(wm) = &state.river_wm { wm.manage_dirty(); }
+                                            if let Some(wm) = &state.river_wm {
+                                                wm.manage_dirty();
+                                            }
                                         }
                                     }
 
@@ -923,12 +931,17 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             if is_interactive {
                                 w_data.anim_start_geo = Some(target_geo);
                             } else {
-                                w_data.anim_start_geo = w_data.anim_target_geo.or(Some(target_geo));
+                                w_data.anim_start_geo = w_data
+                                    .current_visual_geo
+                                    .or(w_data.anim_target_geo)
+                                    .or(Some(target_geo));
                                 if anim_enabled {
                                     state.anim_start_time = Some(std::time::Instant::now());
                                     is_animating = true;
                                     anim_progress = 0.0;
-                                    if let Some(wm) = &state.river_wm { wm.manage_dirty(); }
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
                                 }
                             }
                             w_data.anim_target_geo = Some(target_geo);
@@ -1151,6 +1164,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                             actual_target_geo
                                         };
 
+                                        w_data.current_visual_geo = Some(current_geo);
                                         node.set_position(current_geo.x, current_geo.y);
 
                                         if is_animating {
@@ -1196,6 +1210,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             } else {
                                 target_geo
                             };
+
+                            w_data.current_visual_geo = Some(current_geo);
 
                             node.set_position(current_geo.x, current_geo.y);
                             w_data.window.set_clip_box(0, 0, 0, 0);
