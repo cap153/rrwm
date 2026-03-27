@@ -20,3 +20,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2.180"
 regex-lite = "0.1.9"
+
+[profile.release]
+opt-level = "z"      # 告诉编译器：放弃一切速度优化，只追求最小体积
+lto = true           # 开启全局链接优化，删除所有没用到的代码死角
+codegen-units = 1    # 牺牲编译速度，换取更彻底的优化
+panic = "abort"      # 发生崩溃时直接退出，不生成冗长的错误堆栈信息
+strip = true         # 自动剥离符号表（不再需要手动执行 strip 命令）
