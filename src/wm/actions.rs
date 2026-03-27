@@ -1616,7 +1616,7 @@ impl AppState {
             }
 
             if let Some(r_title) = &rule.title {
-                if regex::Regex::new(r_title)
+                if regex_lite::Regex::new(r_title)
                     .map(|re| re.is_match(title))
                     .unwrap_or(false)
                 {
@@ -2464,7 +2464,7 @@ impl AppState {
                 }
 
                 if let Some(r_tit) = &rule.title {
-                    if regex::Regex::new(r_tit)
+                    if regex_lite::Regex::new(r_tit)
                         .map(|re| re.is_match(&title))
                         .unwrap_or(false)
                     {
