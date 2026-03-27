@@ -1602,7 +1602,7 @@ impl AppState {
         for rule in rules {
             // 忽略大小写
             if app_id.to_lowercase().contains(&rule.appid.to_lowercase()) {
-                return rule.icon.clone(); 
+                return rule.icon.clone();
             }
         }
 
@@ -2324,6 +2324,62 @@ impl AppState {
                 );
                 w.is_fullscreen = false;
                 // 这里不需要发 exit_fullscreen，因为 ManageStart 会根据 is_fullscreen == false 自动执行退场逻辑
+            }
+        }
+    }
+    /// 辅助：将一个现有的平铺窗口强制转换为悬浮窗口（用于弹窗启发式算法）
+    pub fn make_window_floating(
+        &mut self,
+        win_id: &wayland_backend::client::ObjectId,
+        req_w: i32,
+        req_h: i32,
+    ) {
+        let (mut win_idx, mut out_name_opt, mut win_tags) = (None, None, 0);
+        if let Some(idx) = self.windows.iter().position(|w| &w.id == win_id) {
+            if self.windows[idx].is_floating || self.windows[idx].is_fullscreen {
+                return; // 已经是悬浮或全屏，无需转换
+            }
+            win_idx = Some(idx);
+            out_name_opt = self.windows[idx].output.clone();
+            win_tags = self.windows[idx].tags;
+        }
+
+        if let (Some(idx), Some(out_name)) = (win_idx, out_name_opt) {
+            info!(
+                "-> [Auto-Float] Converting window {:?} to floating mode",
+                win_id
+            );
+            self.windows[idx].is_floating = true;
+            let tree_key = (out_name.clone(), win_tags);
+
+            // 1. 从平铺树中移除
+            if let Some(root) = self.layout_roots.remove(&tree_key) {
+                if let Some(new_root) = LayoutNode::remove_at(root, win_id) {
+                    self.layout_roots.insert(tree_key.clone(), new_root);
+                }
+            }
+
+            // 2. 计算悬浮几何信息
+            if let Some(out_data) = self.outputs.get(&out_name) {
+                let screen = out_data.usable_area;
+                // 如果传入了精确的大小 (如 DimensionsHint 提供的)，就用精确大小；否则用 60%
+                let w = if req_w > 0 {
+                    req_w
+                } else {
+                    (screen.w as f32 * 0.6) as i32
+                };
+                let h = if req_h > 0 {
+                    req_h
+                } else {
+                    (screen.h as f32 * 0.6) as i32
+                };
+
+                self.windows[idx].float_geo =
+                    self.calculate_floating_geometry(win_id, &out_name, win_tags, screen, w, h);
+            }
+
+            if let Some(wm) = &self.river_wm {
+                wm.manage_dirty();
             }
         }
     }

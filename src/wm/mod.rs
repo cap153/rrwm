@@ -112,6 +112,8 @@ pub struct WindowData {
     pub anim_start_geo: Option<Geometry>,
     pub anim_target_geo: Option<Geometry>,
     pub current_visual_geo: Option<Geometry>,
+    pub is_fixed_size: bool,
+    pub has_parent: bool,
 }
 
 pub struct ModeInfo {
@@ -287,6 +289,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     anim_start_geo: None,
                     anim_target_geo: None,
                     current_visual_geo: None,
+                    is_fixed_size: false,
+                    has_parent: false,
                 });
             }
             WmEvent::ManageStart => {
@@ -1588,7 +1592,8 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     let tree_key = (out_id.clone(), current_tag);
 
                     // --- 1. 查询并解析应用规则 ---
-                    let mut should_float = false;
+                    let mut should_float =
+                        w_data.is_floating || w_data.is_fixed_size || w_data.has_parent;
                     let mut should_fullscreen = false;
                     let mut rule_width = None;
                     let mut rule_height = None;
@@ -1604,11 +1609,9 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             if let Some(rule) = rules.iter().find(|r| {
                                 app_id_str.to_lowercase().contains(&r.appid.to_lowercase())
                             }) {
-                                should_float = rule
-                                    .floating
-                                    .as_deref()
-                                    .map(|s| s.to_lowercase() == "true")
-                                    .unwrap_or(false);
+                                if let Some(f_str) = &rule.floating {
+                                    should_float = f_str.to_lowercase() == "true";
+                                }
                                 should_fullscreen = rule
                                     .fullscreen
                                     .as_deref()
@@ -1907,6 +1910,49 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                         state.pointer_op_edges = edges.into();
                         state.pending_op_start = true;
                     }
+                }
+            }
+            // --- 【处理尺寸提示事件 (Dimensions Hint)】 ---
+            WinEvent::DimensionsHint {
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            } => {
+                let id = proxy.id();
+                // 启发式：如果最小宽高 == 最大宽高，且不为0，说明它是不可调整大小的弹窗！
+                let is_fixed = min_width > 0
+                    && min_width == max_width
+                    && min_height > 0
+                    && min_height == max_height;
+
+                if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
+                    w.is_fixed_size = is_fixed;
+                }
+
+                if is_fixed {
+                    info!("-> [DimensionsHint] Fixed size detected for {:?} ({}x{}), scheduling auto-float.", id, min_width, min_height);
+                    // 强制转为悬浮，并直接使用它要求的大小！
+                    state.make_window_floating(&id, min_width, min_height);
+                }
+            }
+
+            // --- 【处理父窗口事件 (Parent)】 ---
+            WinEvent::Parent { parent } => {
+                let id = proxy.id();
+                let has_parent = parent.is_some();
+
+                if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
+                    w.has_parent = has_parent;
+                }
+
+                if has_parent {
+                    info!(
+                        "-> [Parent] Child dialog detected for {:?}, scheduling auto-float.",
+                        id
+                    );
+                    // 强制转为悬浮 (大小未指定，使用默认的 60% 兜底)
+                    state.make_window_floating(&id, 0, 0);
                 }
             }
             _ => {}
