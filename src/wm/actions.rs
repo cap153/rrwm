@@ -1587,9 +1587,9 @@ impl AppState {
 
         let id = win_id?;
         let w = self.windows.iter().find(|w| w.id == id)?;
-        let app_id = w.app_id.as_deref()?;
+        let app_id = w.app_id.as_deref().unwrap_or("");
+        let title = w.title.as_deref().unwrap_or("");
 
-        // 安全获取配置链：config -> window -> rule -> matches
         let rules = self
             .config
             .window
@@ -1599,14 +1599,41 @@ impl AppState {
             .matches
             .as_ref()?;
 
+        let mut best_score = 0;
+        let mut final_icon = None;
+
         for rule in rules {
-            // 忽略大小写
-            if app_id.to_lowercase().contains(&rule.appid.to_lowercase()) {
-                return rule.icon.clone();
+            let mut current_score = 0;
+            let mut match_appid = true;
+            let mut match_title = true;
+
+            if let Some(r_appid) = &rule.appid {
+                if app_id.to_lowercase().contains(&r_appid.to_lowercase()) {
+                    current_score += 1;
+                } else {
+                    match_appid = false;
+                }
+            }
+
+            if let Some(r_title) = &rule.title {
+                if regex::Regex::new(r_title)
+                    .map(|re| re.is_match(title))
+                    .unwrap_or(false)
+                {
+                    current_score += 1;
+                } else {
+                    match_title = false;
+                }
+            }
+
+            // 逻辑判定：全中且得分更高
+            if match_appid && match_title && current_score > best_score {
+                best_score = current_score;
+                final_icon = rule.icon.clone();
             }
         }
 
-        None
+        final_icon
     }
     /// 辅助：统一生成给 Waybar 的状态数据
     fn get_waybar_response_json(&self) -> String {
@@ -1702,25 +1729,31 @@ impl AppState {
 
     /// 辅助：生成 AppID 报告字符串
     fn get_app_ids_report(&self) -> String {
-        let mut report = String::from("ID\tAppID\t\tTitle/Tag\n");
-        report.push_str("--\t-----\t\t---------\n");
+        let mut report = String::from("ID\tAppID\t\tTitle\t\t\tTag\n");
+        report.push_str("--\t-----\t\t-----\t\t\t---\n");
 
         for w in &self.windows {
             let app_id = w.app_id.as_deref().unwrap_or("<Unknown>");
-            let id_raw = w.id.protocol_id(); // 获取 Wayland 对象 ID
-                                             // 这里我们还可以加上 tags 或者是否全屏等信息，方便调试
-            let extra = if w.is_fullscreen { "[Fullscreen]" } else { "" };
+            let title = w.title.as_deref().unwrap_or("<None>");
+            let id_raw = w.id.protocol_id();
+            let extra = if w.is_fullscreen {
+                "[Fullscreen]"
+            } else if w.is_floating {
+                "[Floating]"
+            } else {
+                ""
+            };
 
+            // 加入 title 打印
             report.push_str(&format!(
-                "{}\t{}\t\tTag:{:b} {}\n",
-                id_raw, app_id, w.tags, extra
+                "{}\t{}\t\t{}\t\tTag:{:b} {}\n",
+                id_raw, app_id, title, w.tags, extra
             ));
         }
 
         if self.windows.is_empty() {
             report.push_str("(No windows)\n");
         }
-
         report
     }
 
@@ -2336,7 +2369,7 @@ impl AppState {
     ) {
         let (mut win_idx, mut out_name_opt, mut win_tags) = (None, None, 0);
         if let Some(idx) = self.windows.iter().position(|w| &w.id == win_id) {
-            if self.windows[idx].is_floating || self.windows[idx].is_fullscreen {
+            if self.windows[idx].is_floating {
                 return; // 已经是悬浮或全屏，无需转换
             }
             win_idx = Some(idx);
@@ -2381,6 +2414,223 @@ impl AppState {
             if let Some(wm) = &self.river_wm {
                 wm.manage_dirty();
             }
+        }
+    }
+    /// 核心引擎：综合判定窗口规则与启发式特征
+    pub fn apply_window_rules(&mut self, win_id: &wayland_backend::client::ObjectId) {
+        // 1. 获取元数据
+        let (app_id, title, is_fixed, has_parent, is_floating, out_id_opt, tags) = {
+            if let Some(w) = self.windows.iter().find(|w| &w.id == win_id) {
+                (
+                    w.app_id.clone().unwrap_or_default(),
+                    w.title.clone().unwrap_or_default(),
+                    w.is_fixed_size,
+                    w.has_parent,
+                    w.is_floating,
+                    w.output.clone(),
+                    w.tags,
+                )
+            } else {
+                return;
+            }
+        };
+        let out_id = match out_id_opt {
+            Some(o) => o,
+            None => return,
+        };
+
+        // 2. 规则匹配（得分制：同时命中 appid 和 title 的优先级最高）
+        let mut best_score = 0;
+        let (mut r_float, mut r_fs, mut r_w, mut r_h) = (None, None, None, None);
+
+        if let Some(rules) = self
+            .config
+            .window
+            .as_ref()
+            .and_then(|w| w.rule.as_ref())
+            .and_then(|r| r.matches.as_ref())
+        {
+            for rule in rules {
+                let mut current_score = 0;
+                let mut m_app = true;
+                let mut m_tit = true;
+
+                if let Some(r_app) = &rule.appid {
+                    if app_id.to_lowercase().contains(&r_app.to_lowercase()) {
+                        current_score += 1;
+                    } else {
+                        m_app = false;
+                    }
+                }
+
+                if let Some(r_tit) = &rule.title {
+                    if regex::Regex::new(r_tit)
+                        .map(|re| re.is_match(&title))
+                        .unwrap_or(false)
+                    {
+                        current_score += 1;
+                    } else {
+                        m_tit = false;
+                    }
+                }
+
+                // 只有当所有已配置的项都匹配，且得分不低于当前最高分时，才更新结果
+                // (同分情况下，后面写的规则会覆盖前面的)
+                if m_app && m_tit && (rule.appid.is_some() || rule.title.is_some()) {
+                    if current_score >= best_score {
+                        best_score = current_score;
+                        r_float = rule.floating.clone();
+                        r_fs = rule.fullscreen.clone();
+                        r_w = rule.width.clone();
+                        r_h = rule.height.clone();
+                    }
+                }
+            }
+        }
+
+        // 3. 状态决策
+        let should_float = match r_float.as_deref() {
+            Some(s) if s.to_lowercase() == "true" => true,
+            Some(s) if s.to_lowercase() == "false" => false,
+            _ => is_fixed || has_parent,
+        };
+        let should_fs = r_fs
+            .as_deref()
+            .map(|s| s.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // 4. 计算比例
+        let tree_key = (out_id.clone(), tags);
+        let mut custom_ratio = None;
+        let mut split = crate::wm::layout::SplitType::Vertical;
+
+        let target_id = self
+            .tag_focus_history
+            .get(&tree_key)
+            .filter(|&id| *id != *win_id)
+            .cloned();
+        let (ref_w, ref_h) = target_id
+            .and_then(|tid| self.last_geometry.get(&tid).map(|g| (g.w, g.h)))
+            .unwrap_or_else(|| {
+                self.outputs
+                    .get(&out_id)
+                    .map(|o| (o.usable_area.w, o.usable_area.h))
+                    .unwrap_or((1920, 1080))
+            });
+
+        if ref_w < ref_h {
+            split = crate::wm::layout::SplitType::Horizontal;
+        }
+
+        if split == crate::wm::layout::SplitType::Vertical {
+            if let Some(w_str) = r_w.as_deref() {
+                custom_ratio =
+                    Some((1.0 - Self::parse_dimension_ratio(w_str, ref_w)).clamp(0.05, 0.95));
+            }
+        } else {
+            if let Some(h_str) = r_h.as_deref() {
+                custom_ratio =
+                    Some((1.0 - Self::parse_dimension_ratio(h_str, ref_h)).clamp(0.05, 0.95));
+            }
+        }
+
+        // 5. 执行物理操作
+        if should_fs {
+            self.clear_other_fullscreen(win_id, &Some(out_id.clone()), tags);
+        }
+        if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+            w.is_fullscreen = should_fs;
+        }
+
+        if should_float {
+            if !is_floating {
+                let mut sw = (ref_w as f32 * 0.6) as i32;
+                let mut sh = (ref_h as f32 * 0.6) as i32;
+
+                if let Some(ws) = r_w.as_deref() {
+                    sw = (Self::parse_dimension_ratio(ws, ref_w) * ref_w as f32) as i32;
+                }
+                if let Some(hs) = r_h.as_deref() {
+                    sh = (Self::parse_dimension_ratio(hs, ref_h) * ref_h as f32) as i32;
+                }
+
+                self.make_window_floating(win_id, sw, sh);
+            }
+        } else {
+            // 平铺模式
+            if is_floating {
+                if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+                    w.is_floating = false;
+                }
+            }
+
+            let mut already_tiled = false;
+            if let Some(root) = self.layout_roots.get(&tree_key) {
+                fn check(
+                    n: &crate::wm::layout::LayoutNode,
+                    t: &wayland_backend::client::ObjectId,
+                ) -> bool {
+                    match n {
+                        crate::wm::layout::LayoutNode::Window(w) => &w.id == t,
+                        crate::wm::layout::LayoutNode::Container {
+                            left_child,
+                            right_child,
+                            ..
+                        } => check(left_child, t) || check(right_child, t),
+                    }
+                }
+                already_tiled = check(root, win_id);
+            }
+
+            if !already_tiled {
+                let w_data = self
+                    .windows
+                    .iter()
+                    .find(|w| &w.id == win_id)
+                    .cloned()
+                    .unwrap();
+                if !self.layout_roots.contains_key(&tree_key) {
+                    self.layout_roots.insert(
+                        tree_key.clone(),
+                        crate::wm::layout::LayoutNode::Window(w_data),
+                    );
+                } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
+                    let tid = self
+                        .tag_focus_history
+                        .get(&tree_key)
+                        .cloned()
+                        .unwrap_or_else(|| win_id.clone());
+                    if !root.insert_at(&tid, w_data.clone(), split, custom_ratio) {
+                        let new_root = crate::wm::layout::LayoutNode::Container {
+                            split_type: crate::wm::layout::SplitType::Vertical,
+                            ratio: custom_ratio.unwrap_or(0.5),
+                            left_child: Box::new(root),
+                            right_child: Box::new(crate::wm::layout::LayoutNode::Window(w_data)),
+                        };
+                        self.layout_roots.insert(tree_key.clone(), new_root);
+                    } else {
+                        self.layout_roots.insert(tree_key.clone(), root);
+                    }
+                }
+                self.focused_window = Some(win_id.clone());
+                self.focused_output = Some(out_id.clone());
+                self.tag_focus_history
+                    .insert((out_id, tags), win_id.clone());
+            } else if let Some(ratio) = custom_ratio {
+                // 更新比例
+                if let Some(mut root) = self.layout_roots.remove(&tree_key) {
+                    root.update_ratio_for_new_window(win_id, ratio);
+                    self.layout_roots.insert(tree_key.clone(), root);
+                }
+                // 重置记录以强行触发重绘
+                if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+                    w.last_proposed_w = 0;
+                    w.last_proposed_h = 0;
+                }
+            }
+        }
+        if let Some(wm) = &self.river_wm {
+            wm.manage_dirty();
         }
     }
 }

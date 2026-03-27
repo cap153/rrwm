@@ -99,11 +99,12 @@ gaps = "2" # Window gaps
 [window.active] # Set border for the focused window; width should not exceed the gaps defined in [window]
 border = { width = "2", color = "#bd93f9", resize_color = "#ff5555" }
 
-[window.rule] # Use 'rrwm --appid' to list all active windows and their appids
+[window.rule] # You can use 'rrwm --appid' List all active windows with their appid and title
 match = [
 	{ appid="chromium", icon="", width="27%" }, # Split tiled window width/height by ratio, units in % or px
 	{ appid="scrcpy", icon="", width="34.31%", height="100%", floating="true" },
-	{ appid="zen-browser", icon="", width="27%"  },
+	{ appid="zen-browser", icon="" },
+	{ appid="zen-browser", title="Peek*", icon="", width="27%" }, # Allow regular matching via title
 	{ appid="kitty", icon="󰆍" },
 	{ appid="neovide", icon="" },
 	{ appid="wechat", icon="" },

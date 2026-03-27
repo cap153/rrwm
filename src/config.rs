@@ -68,7 +68,8 @@ pub struct ActiveConfig {
 // --- 定义单条匹配规则 ---
 #[derive(Deserialize, Debug, Clone)]
 pub struct WindowRuleMatch {
-    pub appid: String,
+    pub appid: Option<String>,
+    pub title: Option<String>,
     pub icon: Option<String>, 
     pub width: Option<String>,
     pub height: Option<String>,

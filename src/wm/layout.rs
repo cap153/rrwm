@@ -264,6 +264,34 @@ impl LayoutNode {
             }
         }
     }
+    // --- 允许更新已入树窗口的分割比例 ---
+    pub fn update_ratio_for_new_window(&mut self, target_id: &ObjectId, new_ratio: f32) -> bool {
+        match self {
+            LayoutNode::Window(_) => false,
+            LayoutNode::Container { left_child, right_child, ratio, .. } => {
+                let mut found = false;
+                // 新窗口通常是作为 right_child 插入的
+                if let LayoutNode::Window(w) = &**right_child {
+                    if &w.id == target_id {
+                        *ratio = new_ratio;
+                        found = true;
+                    }
+                }
+                // 兜底检查 left_child
+                if let LayoutNode::Window(w) = &**left_child {
+                    if &w.id == target_id {
+                        *ratio = new_ratio;
+                        found = true;
+                    }
+                }
+                if found { return true; }
+
+                // 递归查找
+                left_child.update_ratio_for_new_window(target_id, new_ratio) ||
+                right_child.update_ratio_for_new_window(target_id, new_ratio)
+            }
+        }
+    }
 }
 
 pub fn calculate_layout(

@@ -89,11 +89,12 @@ gaps = "2" # 窗口间隙
 [window.active] # 聚焦窗口设置边框，width不要大于 [window] 中的gaps
 border = { width = "2", color = "#bd93f9", resize_color = "#ff5555" }
 
-[window.rule] # rrwm --appid 列出所有活动窗口及其 appid
+[window.rule] # rrwm --appid 列出所有活动窗口及其 appid 和 title
 match = [
 	{ appid="chromium", icon="", width="27%" }, # 平铺窗口宽/高按比例分割，单位百分比或px
 	{ appid="scrcpy", icon="", width="34.31%", height="100%", floating="true" },
-	{ appid="zen-browser", icon="", width="27%"  },
+	{ appid="zen-browser", icon="" },
+	{ appid="zen-browser", title="Peek*", icon="", width="27%" }, # 允许通过 title 正则匹配
 	{ appid="kitty", icon="󰆍" },
 	{ appid="neovide", icon="" },
 	{ appid="wechat", icon="" },
