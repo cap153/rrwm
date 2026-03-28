@@ -2555,6 +2555,17 @@ impl AppState {
                 }
 
                 self.make_window_floating(win_id, sw, sh);
+
+                // --- 【给新诞生的悬浮窗口赋予焦点】 ---
+                self.focused_window = Some(win_id.clone());
+                self.focused_output = Some(out_id.clone());
+                self.tag_focus_history
+                    .insert((out_id, tags), win_id.clone());
+                if let Some(seat) = &self.main_seat {
+                    if let Some(w) = self.windows.iter().find(|w| &w.id == win_id) {
+                        seat.focus_window(&w.window);
+                    }
+                }
             }
         } else {
             // 平铺模式
