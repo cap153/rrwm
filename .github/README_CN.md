@@ -147,12 +147,14 @@ Return = { action = "spawn", args = ["ghostty"] }
 [keybindings.alt_shift]
 # 当前聚焦的窗口切换悬浮/平铺状态
 space = { action = "toggle_window_floating" }
-# 重载配置(插拔显示器可能会导致waybar重叠，可以尝试重启waybar)
-c = [
-	{ action = "reload_configuration" },
-	{ action = "spawn", args = ["pkill", "waybar"] },
-	{ action = "shell", cmd = "sleep 0.1;waybar &" },
+# 重载配置
+c = { action = "reload_configuration" }
+# 退出当前rrwm的river
+q = [
+	{ action="spawn", args=["pkill", "fcitx5"] },
+	{ action="shell", cmd="fuser -k ${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" }
 ]
+
 # 跨标签移动窗口
 1 = { action = "move", args = ["1"] }
 # ...

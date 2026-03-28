@@ -157,12 +157,14 @@ Return = { action = "spawn", args = ["ghostty"] }
 [keybindings.alt_shift]
 # Toggle the currently focused window between floating/tiling states
 space = { action = "toggle_window_floating" }
-# Reload configuration (hot-plugging monitors might cause waybar overlap, try restarting waybar)
-c = [
-	{ action = "reload_configuration" },
-	{ action = "spawn", args = ["pkill", "waybar"] },
-	{ action = "shell", cmd = "sleep 0.1;waybar &" },
+# Overload configuration
+c = { action = "reload_configuration" }
+# Exit the current river.
+q = [
+	{ action="spawn", args=["pkill", "fcitx5"] },
+	{ action="shell", cmd="fuser -k ${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" }
 ]
+
 # Move window across tags
 1 = { action = "move", args = ["1"] }
 # ...
