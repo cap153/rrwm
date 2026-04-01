@@ -2418,8 +2418,8 @@ impl AppState {
     }
     /// 核心引擎：综合判定窗口规则与启发式特征
     pub fn apply_window_rules(&mut self, win_id: &wayland_backend::client::ObjectId) {
-        // 1. 获取元数据
-        let (app_id, title, is_fixed, has_parent, is_floating, out_id_opt, tags) = {
+        // 1. 安全提取窗口元数据
+        let (app_id, title, is_fixed, has_parent, is_floating, is_fs, out_id_opt, tags) = {
             if let Some(w) = self.windows.iter().find(|w| &w.id == win_id) {
                 (
                     w.app_id.clone().unwrap_or_default(),
@@ -2427,6 +2427,7 @@ impl AppState {
                     w.is_fixed_size,
                     w.has_parent,
                     w.is_floating,
+                    w.is_fullscreen,
                     w.output.clone(),
                     w.tags,
                 )
@@ -2442,7 +2443,6 @@ impl AppState {
         // 2. 规则匹配（得分制：同时命中 appid 和 title 的优先级最高）
         let mut best_score = 0;
         let (mut r_float, mut r_fs, mut r_w, mut r_h) = (None, None, None, None);
-
         if let Some(rules) = self
             .config
             .window
@@ -2454,7 +2454,6 @@ impl AppState {
                 let mut current_score = 0;
                 let mut m_app = true;
                 let mut m_tit = true;
-
                 if let Some(r_app) = &rule.appid {
                     if app_id.to_lowercase().contains(&r_app.to_lowercase()) {
                         current_score += 1;
@@ -2462,7 +2461,6 @@ impl AppState {
                         m_app = false;
                     }
                 }
-
                 if let Some(r_tit) = &rule.title {
                     if regex_lite::Regex::new(r_tit)
                         .map(|re| re.is_match(&title))
@@ -2473,9 +2471,6 @@ impl AppState {
                         m_tit = false;
                     }
                 }
-
-                // 只有当所有已配置的项都匹配，且得分不低于当前最高分时，才更新结果
-                // (同分情况下，后面写的规则会覆盖前面的)
                 if m_app && m_tit && (rule.appid.is_some() || rule.title.is_some()) {
                     if current_score >= best_score {
                         best_score = current_score;
@@ -2488,22 +2483,24 @@ impl AppState {
             }
         }
 
-        // 3. 状态决策
+        // 3. 全屏决策：如果规则没写，保持当前是否全屏的状态 (is_fs)
+        let should_fs = match r_fs.as_deref() {
+            Some(s) if s.to_lowercase() == "true" => true,
+            Some(s) if s.to_lowercase() == "false" => false,
+            _ => is_fs, // 没有规则时，不要关掉用户手动开启的全屏
+        };
+
+        // 悬浮决策：如果规则没写，保持当前是否悬浮的状态 (is_floating) 或 听系统的 (is_fixed/has_parent)
         let should_float = match r_float.as_deref() {
             Some(s) if s.to_lowercase() == "true" => true,
             Some(s) if s.to_lowercase() == "false" => false,
-            _ => is_fixed || has_parent,
+            _ => is_floating || is_fixed || has_parent, // 没有规则时，不要把手动悬浮的窗塞回平铺
         };
-        let should_fs = r_fs
-            .as_deref()
-            .map(|s| s.to_lowercase() == "true")
-            .unwrap_or(false);
 
         // 4. 计算比例
         let tree_key = (out_id.clone(), tags);
         let mut custom_ratio = None;
         let mut split = crate::wm::layout::SplitType::Vertical;
-
         let target_id = self
             .tag_focus_history
             .get(&tree_key)
@@ -2517,11 +2514,9 @@ impl AppState {
                     .map(|o| (o.usable_area.w, o.usable_area.h))
                     .unwrap_or((1920, 1080))
             });
-
         if ref_w < ref_h {
             split = crate::wm::layout::SplitType::Horizontal;
         }
-
         if split == crate::wm::layout::SplitType::Vertical {
             if let Some(w_str) = r_w.as_deref() {
                 custom_ratio =
@@ -2534,38 +2529,33 @@ impl AppState {
             }
         }
 
-        // 5. 执行物理操作
-        if should_fs {
+        // 5. 执行全屏变更
+        if should_fs && !is_fs {
+            // 只有当从非全屏变为全屏时，才清场
             self.clear_other_fullscreen(win_id, &Some(out_id.clone()), tags);
         }
         if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
             w.is_fullscreen = should_fs;
         }
 
+        // 6. 执行悬浮与平铺处理
         if should_float {
             if !is_floating {
                 let mut sw = (ref_w as f32 * 0.6) as i32;
                 let mut sh = (ref_h as f32 * 0.6) as i32;
-
                 if let Some(ws) = r_w.as_deref() {
                     sw = (Self::parse_dimension_ratio(ws, ref_w) * ref_w as f32) as i32;
                 }
                 if let Some(hs) = r_h.as_deref() {
                     sh = (Self::parse_dimension_ratio(hs, ref_h) * ref_h as f32) as i32;
                 }
-
                 self.make_window_floating(win_id, sw, sh);
 
-                // --- 【给新诞生的悬浮窗口赋予焦点】 ---
+                // 自动聚焦新诞生的悬浮窗
                 self.focused_window = Some(win_id.clone());
                 self.focused_output = Some(out_id.clone());
                 self.tag_focus_history
                     .insert((out_id, tags), win_id.clone());
-                if let Some(seat) = &self.main_seat {
-                    if let Some(w) = self.windows.iter().find(|w| &w.id == win_id) {
-                        seat.focus_window(&w.window);
-                    }
-                }
             }
         } else {
             // 平铺模式
@@ -2628,12 +2618,10 @@ impl AppState {
                 self.tag_focus_history
                     .insert((out_id, tags), win_id.clone());
             } else if let Some(ratio) = custom_ratio {
-                // 更新比例
                 if let Some(mut root) = self.layout_roots.remove(&tree_key) {
                     root.update_ratio_for_new_window(win_id, ratio);
                     self.layout_roots.insert(tree_key.clone(), root);
                 }
-                // 重置记录以强行触发重绘
                 if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
                     w.last_proposed_w = 0;
                     w.last_proposed_h = 0;
