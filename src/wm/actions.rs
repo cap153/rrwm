@@ -290,6 +290,7 @@ impl AppState {
             self.focused_tags = next_monitor_tags;
 
             if let Some(wm) = &self.river_wm {
+                // info!("-> MANAGE_DIRTY TRIGGERED BY:cycle_output_focus");
                 wm.manage_dirty();
             }
         }
@@ -439,6 +440,7 @@ impl AppState {
                 self.tag_focus_history.insert(new_key, win_id.clone());
 
                 if let Some(wm) = &self.river_wm {
+                    // info!("-> MANAGE_DIRTY TRIGGERED BY:move_window_to_output");
                     wm.manage_dirty();
                 }
 
@@ -552,6 +554,7 @@ impl AppState {
         }
 
         if let Some(wm) = &self.river_wm {
+            // info!("-> MANAGE_DIRTY TRIGGERED BY:focus_floating_in_direction");
             wm.manage_dirty();
         }
     }
@@ -714,6 +717,7 @@ impl AppState {
         config_obj.apply();
 
         if let Some(wm) = &self.river_wm {
+            // info!("-> MANAGE_DIRTY TRIGGERED BY:apply_output_configs");
             wm.manage_dirty();
         }
 
@@ -904,6 +908,7 @@ impl AppState {
                     self.is_resize_mode = false;
                     info!("-> [Mode] Exit Resize Mode");
                     if let Some(wm) = &self.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:ToggleResizeMode.exit");
                         wm.manage_dirty();
                     }
                 } else {
@@ -912,6 +917,7 @@ impl AppState {
                         self.is_resize_mode = true;
                         info!("-> [Mode] Enter Resize Mode");
                         if let Some(wm) = &self.river_wm {
+                            // info!("-> MANAGE_DIRTY TRIGGERED BY:ToggleResizeMode.enter");
                             wm.manage_dirty();
                         }
                     } else {
@@ -926,6 +932,7 @@ impl AppState {
                     self.is_resize_mode = false;
                     info!("-> [Mode] Force Exit Resize Mode");
                     if let Some(wm) = &self.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:ExitResizeMode");
                         wm.manage_dirty();
                     }
                 }
@@ -979,6 +986,7 @@ impl AppState {
 
                     // 强制刷新渲染
                     if let Some(wm) = &self.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Resize");
                         wm.manage_dirty();
                     }
                 }
@@ -996,6 +1004,7 @@ impl AppState {
                                 Direction::Down => w.float_geo.y += step,
                             }
                             if let Some(wm) = &self.river_wm {
+                                // info!("-> MANAGE_DIRTY TRIGGERED BY:MoveStep");
                                 wm.manage_dirty();
                             }
                         } else {
@@ -1166,6 +1175,9 @@ impl AppState {
                             seat.focus_window(&w_data.window);
                         }
                         if let Some(wm) = &self.river_wm {
+                            // info!(
+                            //     "-> MANAGE_DIRTY TRIGGERED BY:ToggleMinimizeRestore.focused_window"
+                            // );
                             wm.manage_dirty();
                         }
                     } else {
@@ -1241,6 +1253,7 @@ impl AppState {
                         self.focused_window = None;
 
                         if let Some(wm) = &self.river_wm {
+                            // info!("-> MANAGE_DIRTY TRIGGERED BY:ToggleMinimizeRestore.hiden");
                             wm.manage_dirty();
                         }
                     }
@@ -1326,6 +1339,7 @@ impl AppState {
 
                         // 强制刷新
                         if let Some(wm) = &self.river_wm {
+                            // info!("-> MANAGE_DIRTY TRIGGERED BY:ToggleFloat");
                             wm.manage_dirty();
                         }
                     }
@@ -1369,6 +1383,7 @@ impl AppState {
                             self.focused_window = Some(target_id.clone());
 
                             if let Some(wm) = &self.river_wm {
+                                // info!("-> MANAGE_DIRTY TRIGGERED BY:SwitchFocusFloat");
                                 wm.manage_dirty();
                             }
                         }
@@ -1396,6 +1411,7 @@ impl AppState {
                         w.is_fullscreen = will_be_fullscreen;
                     }
                     if let Some(wm) = &self.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:ToggleFullscreen");
                         wm.manage_dirty();
                     }
                 }
@@ -1447,6 +1463,7 @@ impl AppState {
                     }
                 }
                 if let Some(wm) = &self.river_wm {
+                    // info!("-> MANAGE_DIRTY TRIGGERED BY:FocusTag");
                     wm.manage_dirty();
                 }
             }
@@ -1957,6 +1974,7 @@ impl AppState {
             self.focused_output = Some(out_id);
         }
         if let Some(wm) = &self.river_wm {
+            // info!("-> MANAGE_DIRTY TRIGGERED BY:move_window_to_tag");
             wm.manage_dirty();
         }
     }
@@ -2079,6 +2097,7 @@ impl AppState {
         }
         // --- 手动触发重新排版 ---
         if let Some(wm) = &self.river_wm {
+            // info!("-> MANAGE_DIRTY TRIGGERED BY:move_window_locally");
             wm.manage_dirty();
         }
     }
@@ -2412,6 +2431,7 @@ impl AppState {
             }
 
             if let Some(wm) = &self.river_wm {
+                // info!("-> MANAGE_DIRTY TRIGGERED BY:make_window_floating");
                 wm.manage_dirty();
             }
         }
@@ -2419,7 +2439,7 @@ impl AppState {
     /// 核心引擎：综合判定窗口规则与启发式特征
     pub fn apply_window_rules(&mut self, win_id: &wayland_backend::client::ObjectId) {
         // 1. 安全提取窗口元数据
-        let (app_id, title, is_fixed, has_parent, is_floating, is_fs, out_id_opt, tags) = {
+        let (app_id, title, is_fixed, has_parent, is_floating, out_id_opt, tags, created_at) = {
             if let Some(w) = self.windows.iter().find(|w| &w.id == win_id) {
                 (
                     w.app_id.clone().unwrap_or_default(),
@@ -2427,9 +2447,9 @@ impl AppState {
                     w.is_fixed_size,
                     w.has_parent,
                     w.is_floating,
-                    w.is_fullscreen,
                     w.output.clone(),
                     w.tags,
+                    w.created_at,
                 )
             } else {
                 return;
@@ -2440,9 +2460,15 @@ impl AppState {
             None => return,
         };
 
-        // 2. 规则匹配（得分制：同时命中 appid 和 title 的优先级最高）
+        // 只有在窗口诞生的前 1000 毫秒内，才允许规则引擎评估它的状态。
+        if created_at.elapsed().as_millis() > 1000 {
+            return;
+        }
+
+        // 2. 规则匹配 (得分制优先级机制)
         let mut best_score = 0;
         let (mut r_float, mut r_fs, mut r_w, mut r_h) = (None, None, None, None);
+
         if let Some(rules) = self
             .config
             .window
@@ -2454,6 +2480,7 @@ impl AppState {
                 let mut current_score = 0;
                 let mut m_app = true;
                 let mut m_tit = true;
+
                 if let Some(r_app) = &rule.appid {
                     if app_id.to_lowercase().contains(&r_app.to_lowercase()) {
                         current_score += 1;
@@ -2461,6 +2488,7 @@ impl AppState {
                         m_app = false;
                     }
                 }
+
                 if let Some(r_tit) = &rule.title {
                     if regex_lite::Regex::new(r_tit)
                         .map(|re| re.is_match(&title))
@@ -2471,6 +2499,8 @@ impl AppState {
                         m_tit = false;
                     }
                 }
+
+                // 只有全满足，并且得分高于/等于当前最高分，才覆盖规则
                 if m_app && m_tit && (rule.appid.is_some() || rule.title.is_some()) {
                     if current_score >= best_score {
                         best_score = current_score;
@@ -2483,24 +2513,22 @@ impl AppState {
             }
         }
 
-        // 3. 全屏决策：如果规则没写，保持当前是否全屏的状态 (is_fs)
-        let should_fs = match r_fs.as_deref() {
-            Some(s) if s.to_lowercase() == "true" => true,
-            Some(s) if s.to_lowercase() == "false" => false,
-            _ => is_fs, // 没有规则时，不要关掉用户手动开启的全屏
-        };
-
-        // 悬浮决策：如果规则没写，保持当前是否悬浮的状态 (is_floating) 或 听系统的 (is_fixed/has_parent)
+        // 3. 状态决策
         let should_float = match r_float.as_deref() {
             Some(s) if s.to_lowercase() == "true" => true,
             Some(s) if s.to_lowercase() == "false" => false,
-            _ => is_floating || is_fixed || has_parent, // 没有规则时，不要把手动悬浮的窗塞回平铺
+            _ => is_fixed || has_parent, // 系统启发式推断
         };
+        let should_fs = r_fs
+            .as_deref()
+            .map(|s| s.to_lowercase() == "true")
+            .unwrap_or(false);
 
         // 4. 计算比例
         let tree_key = (out_id.clone(), tags);
         let mut custom_ratio = None;
         let mut split = crate::wm::layout::SplitType::Vertical;
+
         let target_id = self
             .tag_focus_history
             .get(&tree_key)
@@ -2514,9 +2542,11 @@ impl AppState {
                     .map(|o| (o.usable_area.w, o.usable_area.h))
                     .unwrap_or((1920, 1080))
             });
+
         if ref_w < ref_h {
             split = crate::wm::layout::SplitType::Horizontal;
         }
+
         if split == crate::wm::layout::SplitType::Vertical {
             if let Some(w_str) = r_w.as_deref() {
                 custom_ratio =
@@ -2529,16 +2559,14 @@ impl AppState {
             }
         }
 
-        // 5. 执行全屏变更
-        if should_fs && !is_fs {
-            // 只有当从非全屏变为全屏时，才清场
+        // 5. 执行物理操作
+        if should_fs {
             self.clear_other_fullscreen(win_id, &Some(out_id.clone()), tags);
         }
         if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
             w.is_fullscreen = should_fs;
         }
 
-        // 6. 执行悬浮与平铺处理
         if should_float {
             if !is_floating {
                 let mut sw = (ref_w as f32 * 0.6) as i32;
@@ -2555,7 +2583,7 @@ impl AppState {
                 self.focused_window = Some(win_id.clone());
                 self.focused_output = Some(out_id.clone());
                 self.tag_focus_history
-                    .insert((out_id, tags), win_id.clone());
+                    .insert((out_id.clone(), tags), win_id.clone());
             }
         } else {
             // 平铺模式
@@ -2613,11 +2641,14 @@ impl AppState {
                         self.layout_roots.insert(tree_key.clone(), root);
                     }
                 }
+
+                // 平铺窗强行夺取焦点
                 self.focused_window = Some(win_id.clone());
                 self.focused_output = Some(out_id.clone());
                 self.tag_focus_history
                     .insert((out_id, tags), win_id.clone());
             } else if let Some(ratio) = custom_ratio {
+                // 如果已经入树了，后来匹配到更具体的规则，追发比例更新！
                 if let Some(mut root) = self.layout_roots.remove(&tree_key) {
                     root.update_ratio_for_new_window(win_id, ratio);
                     self.layout_roots.insert(tree_key.clone(), root);
@@ -2629,6 +2660,7 @@ impl AppState {
             }
         }
         if let Some(wm) = &self.river_wm {
+            info!("-> MANAGE_DIRTY TRIGGERED BY:apply_window_rules");
             wm.manage_dirty();
         }
     }

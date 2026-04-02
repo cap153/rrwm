@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::io::{AsFd, AsRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use wayland_client::Connection;
+use wayland_client::{Connection, Proxy};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -167,11 +167,39 @@ fn main() {
             },
         ];
 
-        // 5. 阻塞等待 (挂起 CPU，直到有任意一个 FD 变为可读)
-        // timeout = -1 表示无限等待
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        // 5. 【动态计算超时时间 (60FPS/144FPS 节流阀)】
+        let timeout = if state.anim_start_time.is_some() {
+            // 如果系统正在播放动画，查找当前所有屏幕中最高的物理刷新率
+            let mut max_refresh_mhz = 60_000; // 默认兜底 60Hz (60000 mHz)
+            for head in &state.heads {
+                if let Some(mode_id) = &head.current_mode {
+                    if let Some(mode) = head.modes.iter().find(|m| m.obj.id() == *mode_id) {
+                        if mode.refresh > max_refresh_mhz {
+                            max_refresh_mhz = mode.refresh;
+                        }
+                    }
+                }
+            }
+            // 根据最高刷新率计算每帧需要停留的毫秒数
+            // 公式: 1000 ms / (refresh_mhz / 1000.0 hz) = 1_000_000 / refresh_mhz
+            (1_000_000 / max_refresh_mhz.max(1)) as i32
+        } else {
+            -1 // 无动画时，设为 -1 (无限休眠，彻底解放 CPU)
+        };
 
-        if ret > 0 {
+        // 6. 阻塞等待 (挂起 CPU)
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+
+        if ret == 0 {
+            // --- 情况 0: 超时触发 (动画滴答 Animation Tick) ---
+            // poll 返回 0 表示 16ms/7ms 时间到了，但并没有真实的鼠标键盘事件。
+            // 此时我们必须释放 Wayland 的读取锁，并主动请求渲染动画的下一帧！
+            drop(guard);
+            if let Some(wm) = &state.river_wm {
+                wm.manage_dirty();
+            }
+            continue;
+        } else if ret > 0 {
             // --- 情况 A: Wayland 有新数据 ---
             if fds[0].revents & libc::POLLIN != 0 {
                 // 真正的读取网络数据到缓冲区

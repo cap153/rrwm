@@ -115,6 +115,8 @@ pub struct WindowData {
     pub current_visual_geo: Option<Geometry>,
     pub is_fixed_size: bool,
     pub has_parent: bool,
+    pub matched_rule_score: u32,
+    pub created_at: std::time::Instant,
 }
 
 pub struct ModeInfo {
@@ -293,6 +295,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     current_visual_geo: None,
                     is_fixed_size: false,
                     has_parent: false,
+                    matched_rule_score: 0,
+                    created_at: std::time::Instant::now(),
                 });
             }
             WmEvent::ManageStart => {
@@ -553,7 +557,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     .and_then(|a| a.enable.as_deref())
                     .unwrap_or("true")
                     == "true"
-                    && !state.is_resize_mode; // 在 Resize 模式下强制禁用动画，保证跟手率
+                    && !state.is_resize_mode;
                 let anim_duration = state
                     .config
                     .animations
@@ -562,7 +566,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(150);
 
-                // 只要有翻页意图，立刻引爆动画时钟
                 if state.tag_anim_direction.is_some() && state.anim_start_time.is_none() {
                     state.anim_start_time = Some(std::time::Instant::now());
                 }
@@ -576,23 +579,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         if elapsed < anim_duration {
                             anim_progress = elapsed as f32 / anim_duration as f32;
                             is_animating = true;
-                            if let Some(wm) = &state.river_wm {
-                                wm.manage_dirty();
-                            }
                         } else {
-                            state.anim_start_time = None; // 动画结束
-                                                          // 动画结束瞬间，强制清空所有窗口的 last_proposed 记录。
-                                                          // 这会逼迫下一帧发送最终的尺寸建议，从而在动画结束后触发一次真实的 Dimensions 检查。
-                                                          // --- 【清理 Tag 动画标记】 ---
+                            state.anim_start_time = None;
                             state.tag_anim_direction = None;
                             state.tag_anim_old_mask = 0;
                             for w in &mut state.windows {
                                 w.last_proposed_w = 0;
                                 w.last_proposed_h = 0;
-                                w.anim_start_geo = w.anim_target_geo; // 动画自然结束时，必须同步起点
-                            }
-                            if let Some(wm) = &state.river_wm {
-                                wm.manage_dirty();
+                                w.anim_start_geo = w.anim_target_geo;
                             }
                         }
                     }
@@ -871,6 +865,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                             is_animating = true;
                                             anim_progress = 0.0;
                                             if let Some(wm) = &state.river_wm {
+                                                // info!("-> MANAGE_DIRTY TRIGGERED BY:WmEvent::ManageStart.geo_changed.anim_enabled.平铺");
                                                 wm.manage_dirty();
                                             }
                                         }
@@ -946,6 +941,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     is_animating = true;
                                     anim_progress = 0.0;
                                     if let Some(wm) = &state.river_wm {
+                                        // info!("-> MANAGE_DIRTY TRIGGERED BY:WmEvent::ManageStart.geo_changed.anim_enabled.悬浮");
                                         wm.manage_dirty();
                                     }
                                 }
@@ -1292,6 +1288,7 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
                     info.w = width;
                     info.h = height;
                     if let Some(wm) = &state.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverOutputV1, ()>");
                         wm.manage_dirty();
                     }
                 }
@@ -1345,6 +1342,7 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                         info!("-> [Focus] The mouse crosses the physical boundary and automatically locks the monitor: {}", name);
                         state.focused_output = Some(name);
                         if let Some(wm) = &state.river_wm {
+                            // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverSeatV1>");
                             wm.manage_dirty();
                         }
                     }
@@ -1578,6 +1576,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
                     w.is_fullscreen = true;
                     if let Some(wm) = &state.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::FullscreenRequested");
                         wm.manage_dirty();
                     }
                 }
@@ -1590,6 +1589,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 if let Some(w) = state.windows.iter_mut().find(|w| w.id == id) {
                     w.is_fullscreen = false;
                     if let Some(wm) = &state.river_wm {
+                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::ExitFullscreenRequested");
                         wm.manage_dirty();
                     }
                 }
@@ -1644,6 +1644,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                 if w.layout_retry_count < 3 {
                                     w.layout_retry_count += 1;
                                     if let Some(wm) = &state.river_wm {
+                                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::Dimensions.is_fullscreen");
                                         wm.manage_dirty();
                                     }
                                 }
@@ -1678,6 +1679,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                     if w.layout_retry_count < 3 {
                                         w.layout_retry_count += 1;
                                         if let Some(wm) = &state.river_wm {
+                                            // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::Dimensions.!w.is_fullscreen");
                                             wm.manage_dirty();
                                         }
                                     } else if w.layout_retry_count == 50 {
@@ -1818,6 +1820,7 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppState {
                 // 3. 强制通知：由于新绑定的 enable() 必须在 manage 序列执行
                 // 我们调用 manage_dirty() 强行让 River 发起一次 ManageStart
                 if let Some(wm) = &state.river_wm {
+                    // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverXkbConfigV1>");
                     wm.manage_dirty();
                 }
                 state.needs_reload = false;
@@ -1996,6 +1999,7 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppState {
                         };
                         out_data.ls_output = Some(proxy.clone());
                         if let Some(wm) = &state.river_wm {
+                            // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverLayerShellOutputV1>");
                             wm.manage_dirty();
                         }
                     }
@@ -2143,6 +2147,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, ()> for AppState {
                 info!("-> [Success] The display configuration has taken effect and the layout is being refreshed...");
                 // 强行触发一次 ManageStart，让 BSP 树重新计算
                 if let Some(wm) = &state.river_wm {
+    // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<ZwlrOutputConfigurationV1>");
                     wm.manage_dirty();
                 }
             }
