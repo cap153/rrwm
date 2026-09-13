@@ -27,12 +27,41 @@ paru -S rrwm-bin
 
 ## Build from Source
 
+### Local build (glibc)
+
 ```bash
 git clone https://github.com/cap153/rrwm.git
 cd rrwm
 cargo build --release
 sudo cp target/release/rrwm /usr/local/bin
 sudo cp example/rrwm.desktop /usr/local/share/wayland-sessions/
+```
+
+### Static build (musl, portable binary)
+
+Builds a fully static binary inside an Alpine container, with no external
+dependencies, so it runs directly on any Linux distribution (e.g. Arch Linux).
+
+With [just](https://github.com/casey/just):
+
+```bash
+just build-musl     # -> target/x86_64-unknown-linux-musl/release/rrwm
+just check-musl     # confirm it is a static executable
+just install-musl   # install to ~/.local/bin/rrwm
+```
+
+Or run the equivalent Docker command directly:
+
+```bash
+docker run --rm -it \
+  -v "$(pwd)":/volume -w /volume \
+  -v rrwm-cargo-cache:/root/.cargo \
+  alpine:latest sh -c "
+    apk add --no-cache curl gcc musl-dev libxkbcommon-dev libxkbcommon-static pkgconf && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
+    source /root/.cargo/env && \
+    cargo build --release --target x86_64-unknown-linux-musl
+  "
 ```
 
 # Usage

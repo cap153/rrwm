@@ -17,12 +17,41 @@ paru -S rrwm-bin
 
 ## 编译安装
 
+### 本地编译 (glibc)
+
 ```bash
 git clone https://github.com/cap153/rrwm.git
 cd rrwm
 cargo build --release
 sudo cp target/release/rrwm /usr/local/bin
 sudo cp example/rrwm.desktop /usr/local/share/wayland-sessions/
+```
+
+### 静态编译 (musl，可移植二进制)
+
+在 Alpine 容器内编译出**全静态**二进制，不依赖任何外部库，可直接在
+任意 Linux 发行版（例如 Arch Linux）上运行。
+
+如果你已安装 [just](https://github.com/casey/just)：
+
+```bash
+just build-musl     # -> target/x86_64-unknown-linux-musl/release/rrwm
+just check-musl     # 确认其为静态可执行文件
+just install-musl   # 安装到 ~/.local/bin/rrwm
+```
+
+或者直接使用等价的 Docker 命令：
+
+```bash
+docker run --rm -it \
+  -v "$(pwd)":/volume -w /volume \
+  -v rrwm-cargo-cache:/root/.cargo \
+  alpine:latest sh -c "
+    apk add --no-cache curl gcc musl-dev libxkbcommon-dev libxkbcommon-static pkgconf && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
+    source /root/.cargo/env && \
+    cargo build --release --target x86_64-unknown-linux-musl
+  "
 ```
 
 # 用法
