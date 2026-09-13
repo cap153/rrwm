@@ -23,21 +23,16 @@
     IN THE SOFTWARE.
   </copyright>
 
-  <description summary="configure input devices">
+  <description summary="manage seats and input devices">
     This protocol supports creating/destroying seats, assigning input devices to
     seats, and configuring input devices (e.g. setting keyboard repeat rate).
 
     The key words "must", "must not", "required", "shall", "shall not",
     "should", "should not", "recommended", "may", and "optional" in this
     document are to be interpreted as described in IETF RFC 2119.
-
-    Warning! The protocol described in this file is currently in the testing
-    phase. Backward compatible changes may be added together with the
-    corresponding interface version bump. Backward incompatible changes can only
-    be done by creating a new major version of the extension.
   </description>
 
-  <interface name="river_input_manager_v1" version="1">
+  <interface name="river_input_manager_v1" version="2">
     <description summary="input manager global interface">
       Input manager global interface.
     </description>
@@ -115,7 +110,7 @@
     </event>
   </interface>
 
-  <interface name="river_input_device_v1" version="1">
+  <interface name="river_input_device_v1" version="2">
     <description summary="an input device">
       An input device represents a physical keyboard, mouse, touchscreen, or
       drawing tablet tool. It is assigned to exactly one seat at a time.
@@ -201,8 +196,7 @@
         For example, a factor of 0.5 will make scrolling twice as slow while a
         factor of 3.0 will make scrolling 3 times as fast.
 
-        Negative values for either rate or delay are illegal. A rate of zero
-        will disable any repeating (regardless of the value of delay).
+        Setting a scroll factor less than 0 is a protocol error.
       </description>
       <arg name="factor" type="fixed"/>
     </request>
@@ -236,5 +230,15 @@
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
     </request>
+
+    <event name="done" since="2">
+      <description summary="all information has been sent">
+        This event is sent after all information about the input device has
+        been sent.
+
+        This allows changes to one or more river_input_device_v1 properties to
+        be seen as atomic, even if they happen via multiple events.
+      </description>
+    </event>
   </interface>
 </protocol>

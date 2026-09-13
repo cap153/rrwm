@@ -23,22 +23,17 @@
     IN THE SOFTWARE.
   </copyright>
 
-  <description summary="configure xkbcommon keyboard state">
+  <description summary="configure xkbcommon keyboards">
     This protocol allow a client to set the xkbcommon keymap of individual
     keyboard input devices. It also allows switching between the layouts of a
-    keymap and toggling capslock/numlock state.
+    keymap and toggling capslock/numlock/scrolllock state.
 
     The key words "must", "must not", "required", "shall", "shall not",
     "should", "should not", "recommended", "may", and "optional" in this
     document are to be interpreted as described in IETF RFC 2119.
-
-    Warning! The protocol described in this file is currently in the testing
-    phase. Backward compatible changes may be added together with the
-    corresponding interface version bump. Backward incompatible changes can only
-    be done by creating a new major version of the extension.
   </description>
 
-  <interface name="river_xkb_config_v1" version="1">
+  <interface name="river_xkb_config_v1" version="3">
     <description summary="xkb config global interface">
       Global interface for configuring xkb devices.
 
@@ -112,7 +107,7 @@
     </event>
   </interface>
 
-  <interface name="river_xkb_keymap_v1" version="1">
+  <interface name="river_xkb_keymap_v1" version="3">
     <description summary="xkbcommon keymap">
       This object is the result of attempting to create an xkbcommon keymap.
     </description>
@@ -142,7 +137,7 @@
     </event>
   </interface>
 
-  <interface name="river_xkb_keyboard_v1" version="1">
+  <interface name="river_xkb_keyboard_v1" version="3">
     <description summary="xkbcommon keyboard device">
       This object represent a physical keyboard which has its configuration and
       state managed by xkbcommon.
@@ -182,6 +177,8 @@
     <request name="set_keymap">
       <description summary="set the keymap">
         Set the keymap for the keyboard.
+
+        Setting a keymap will reset all layout/modifier state.
 
         It is a protocol error to pass a keymap object for which the
         river_xkb_keymap_v1.success event was not received.
@@ -261,7 +258,7 @@
 
     <event name="numlock_enabled">
       <description summary="numlock is currently enabled">
-        Capslock is currently enabled for the keyboard.
+        Numlock is currently enabled for the keyboard.
 
         This event is sent once when the river_xkb_keyboard_v1 is created and
         again whenever the numlock state changes.
@@ -270,10 +267,50 @@
 
     <event name="numlock_disabled">
       <description summary="numlock is currently disabled">
-        Capslock is currently disabled for the keyboard.
+        Numlock is currently disabled for the keyboard.
 
         This event is sent once when the river_xkb_keyboard_v1 is created and
         again whenever the numlock state changes.
+      </description>
+    </event>
+
+    <event name="done" since="2">
+      <description summary="all information has been sent">
+        This event is sent after all information about the keyboard has been
+        sent.
+
+        This allows changes to one or more river_xkb_keyboard_v1 properties to
+        be seen as atomic, even if they happen via multiple events.
+      </description>
+    </event>
+
+    <request name="scrolllock_enable" since="3">
+      <description summary="enable scrolllock">
+        Enable scrolllock for the keyboard.
+      </description>
+    </request>
+
+    <request name="scrolllock_disable" since="3">
+      <description summary="disable scrolllock">
+        Disable scrolllock for the keyboard.
+      </description>
+    </request>
+
+    <event name="scrolllock_enabled" since="3">
+      <description summary="scrolllock is currently enabled">
+        Scrolllock is currently enabled for the keyboard.
+
+        This event is sent once when the river_xkb_keyboard_v1 is created and
+        again whenever the scrolllock state changes.
+      </description>
+    </event>
+
+    <event name="scrolllock_disabled" since="3">
+      <description summary="scrolllock is currently disabled">
+        Scrolllock is currently disabled for the keyboard.
+
+        This event is sent once when the river_xkb_keyboard_v1 is created and
+        again whenever the scrolllock state changes.
       </description>
     </event>
   </interface>

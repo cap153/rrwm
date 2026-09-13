@@ -93,6 +93,58 @@ pub struct OutputData {
     pub base_tag: u32,
 }
 
+/// 客户端上报尺寸与 WM 期望尺寸不符时，允许连续重试的最大次数。
+/// 每次重试都是由“服务端真的回了一个 dimensions 事件”驱动的，因此不会无限循环。
+const MAX_LAYOUT_RETRIES: u8 = 3;
+
+/// `WindowData::layout_retry_count` 的哨兵值：已放弃对该窗口做尺寸纠正。
+/// 直到目标尺寸再次变化（`last_proposed_*` 被重置为 0）才会重新开始重试。
+const LAYOUT_RETRY_GIVEN_UP: u8 = u8::MAX;
+
+/// 一次尺寸纠正重试的决策结果
+enum RetryDecision {
+    /// 还需要再试一次（调用方负责重新发起请求 / manage_dirty）
+    Retry,
+    /// 重试次数用尽，本次放弃并提示
+    GiveUp,
+    /// 之前已经放弃过，保持沉默
+    Ignore,
+}
+
+/// 推进尺寸纠正重试状态机。只有客户端真的回了一个（不符的）dimensions 事件才会调用，
+/// 因此重试次数天然被限制为 MAX_LAYOUT_RETRIES 次，不会无限循环。
+fn decide_size_retry(layout_retry_count: &mut u8) -> RetryDecision {
+    match *layout_retry_count {
+        LAYOUT_RETRY_GIVEN_UP => RetryDecision::Ignore,
+        n if n < MAX_LAYOUT_RETRIES => {
+            *layout_retry_count = n + 1;
+            RetryDecision::Retry
+        }
+        _ => {
+            *layout_retry_count = LAYOUT_RETRY_GIVEN_UP;
+            RetryDecision::GiveUp
+        }
+    }
+}
+
+/// 全屏窗口尺寸纠偏的二阶段状态机。
+///
+/// 背景：River 对全屏请求是**幂等**的。若窗口已经在当前输出全屏，再次调用
+/// `fullscreen(&out)` 不会向客户端重发 configure，客户端也就不会重新分配缓冲区。
+/// 因此当全屏窗口上报了错误尺寸时，我们必须先真实地 `exit_fullscreen`
+/// 打破这个幂等锁，再重新进入全屏，才能强制客户端拿到正确的全屏尺寸。
+///
+/// 整个纠偏过程**绝不触碰焦点 API**，只作用在尺寸协议通道上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullscreenSyncState {
+    /// 正常同步状态（已全屏且尺寸吻合，或非全屏窗口）。
+    Synced,
+    /// 检测到全屏尺寸不符：需要在下一个 manage 序列执行一次 exit_fullscreen。
+    Resetting,
+    /// 已退出全屏：需要在紧接着的 manage 序列重新发起 fullscreen。
+    Reapplying,
+}
+
 #[derive(Clone)]
 pub struct WindowData {
     pub id: ObjectId,
@@ -104,7 +156,23 @@ pub struct WindowData {
     pub output: Option<String>,
     pub is_fullscreen: bool,
     pub is_fullscreen_applied: bool,
+    /// 记录当前全屏生效所在的 output 名称（用于跨屏投掷时检测 output 是否变化）。
+    /// 未全屏时为 `None`。
+    pub fullscreen_output: Option<String>,
+    /// 全屏尺寸纠偏状态机（见 `FullscreenSyncState`）。
+    pub fullscreen_sync: FullscreenSyncState,
+    /// 上次下发给客户端的 `set_dimension_bounds` 推荐尺寸（v4 起可用）。
+    /// 记录数值而非单纯布尔，以便在窗口跨屏或显示器分辨率变动时重新下发正确的边界。
+    pub last_dimension_bounds: Option<(i32, i32)>,
+    /// 上次用于全屏尺寸对比的「期望满屏尺寸」。当显示器分辨率/缩放变动导致该值
+    /// 发生变化时，重置纠错预算，让此前耗尽重试而沉默的全屏窗口能够重新自愈。
+    pub last_expected_size: Option<(i32, i32)>,
+    /// 尺寸纠正重试计数：0 = 正常，1..=MAX_LAYOUT_RETRIES = 重试中，
+    /// LAYOUT_RETRY_GIVEN_UP = 已放弃（见上方常量说明）。
     pub layout_retry_count: u8,
+    /// 客户端刚上报了一个不符的尺寸，等待在下一个 manage 序列重新发起请求。
+    /// 这样「重试」严格由真实事件驱动，并且每次事件最多重发一次请求。
+    pub layout_retry_pending: bool,
     pub last_proposed_w: i32,
     pub last_proposed_h: i32,
     pub is_floating: bool,
@@ -145,6 +213,9 @@ pub struct AppState {
     pub config: crate::config::Config,
     pub needs_reload: bool,
     pub river_wm: Option<RiverWindowManagerV1>,
+    /// 实际 bind 到的 river_window_manager_v1 版本（用于 gate 版本相关的请求，
+    /// 例如 v4 才有的 set_dimension_bounds）。
+    pub river_wm_version: u32,
     pub windows: Vec<WindowData>,
     pub outputs: HashMap<String, OutputData>,
     pub main_seat: Option<RiverSeatV1>,
@@ -203,37 +274,65 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
-            name, interface, ..
+            name,
+            interface,
+            version,
+            ..
         } = event
         {
+            // 注意：绝不能用高于合成器所通告的版本去 bind，否则会直接触发协议错误。
+            // 因此这里统一取 min(通告版本, 我们代码支持的最高版本)。
             match interface.as_str() {
                 "zwlr_output_manager_v1" => {
+                    let bind_version = version.min(4);
                     info!(
-                        "[ID:{}] Discovered Display Manager (wlr-output-management)",
-                        name
+                        "[ID:{}] Discovered Display Manager (wlr-output-management v{})",
+                        name, bind_version
                     );
-                    let manager = proxy.bind::<ZwlrOutputManagerV1, _, _>(name, 4, qh, ());
+                    let manager = proxy.bind::<ZwlrOutputManagerV1, _, _>(name, bind_version, qh, ());
                     state.output_manager = Some(manager);
                 }
                 "river_layer_shell_v1" => {
+                    let bind_version = version.min(1);
                     info!("[ID:{}] Binding: Hierarchical Surface Manager (waybar/swww permission is enabled)", name);
-                    let manager = proxy.bind::<RiverLayerShellV1, _, _>(name, 1, qh, ());
+                    let manager = proxy.bind::<RiverLayerShellV1, _, _>(name, bind_version, qh, ());
                     state.layer_shell_manager = Some(manager);
                 }
                 "river_window_manager_v1" => {
-                    let wm = proxy.bind::<RiverWindowManagerV1, _, _>(name, 3, qh, ());
+                    let bind_version = version.min(5);
+                    info!(
+                        "[ID:{}] Binding river_window_manager_v1 v{}",
+                        name, bind_version
+                    );
+                    let wm = proxy.bind::<RiverWindowManagerV1, _, _>(name, bind_version, qh, ());
                     state.river_wm = Some(wm);
+                    state.river_wm_version = bind_version;
                 }
                 "river_xkb_bindings_v1" => {
-                    let xkb = proxy.bind::<RiverXkbBindingsV1, _, _>(name, 2, qh, ());
+                    let bind_version = version.min(3);
+                    info!(
+                        "[ID:{}] Binding river_xkb_bindings_v1 v{}",
+                        name, bind_version
+                    );
+                    let xkb = proxy.bind::<RiverXkbBindingsV1, _, _>(name, bind_version, qh, ());
                     state.xkb_manager = Some(xkb);
                 }
                 "river_input_manager_v1" => {
-                    let manager = proxy.bind::<RiverInputManagerV1, _, _>(name, 1, qh, ());
+                    let bind_version = version.min(2);
+                    info!(
+                        "[ID:{}] Binding river_input_manager_v1 v{}",
+                        name, bind_version
+                    );
+                    let manager = proxy.bind::<RiverInputManagerV1, _, _>(name, bind_version, qh, ());
                     state.input_manager = Some(manager);
                 }
                 "river_xkb_config_v1" => {
-                    let config = proxy.bind::<RiverXkbConfigV1, _, _>(name, 1, qh, ());
+                    let bind_version = version.min(3);
+                    info!(
+                        "[ID:{}] Binding river_xkb_config_v1 v{}",
+                        name, bind_version
+                    );
+                    let config = proxy.bind::<RiverXkbConfigV1, _, _>(name, bind_version, qh, ());
                     state.xkb_config = Some(config);
                 }
                 _ => {}
@@ -279,7 +378,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     output: current_out,
                     is_fullscreen: false,
                     is_fullscreen_applied: false,
+                    fullscreen_output: None,
+                    fullscreen_sync: FullscreenSyncState::Synced,
+                    last_dimension_bounds: None,
+                    last_expected_size: None,
                     layout_retry_count: 0,
+                    layout_retry_pending: false,
                     last_proposed_w: 0,
                     last_proposed_h: 0,
                     is_floating: false,
@@ -619,17 +723,54 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
 
                         if let Some(out_obj) = target_river_output {
-                            // 如果处于尺寸纠正重试期，我们通过 退出/进入 全屏，强制 Wayland 重新下发缩放参数
-                            if w.layout_retry_count > 0 && w.layout_retry_count % 2 != 0 {
-                                w.window.exit_fullscreen();
-                                w.window.inform_not_fullscreen();
-                                w.is_fullscreen_applied = false;
-                            } else if !w.is_fullscreen_applied {
-                                w.window.fullscreen(&out_obj);
-                                w.window.inform_fullscreen();
-                                w.is_fullscreen_applied = true;
-                                w.last_proposed_w = 0;
-                                w.last_proposed_h = 0;
+                            match w.fullscreen_sync {
+                                FullscreenSyncState::Resetting => {
+                                    // 第一阶段：真实退出全屏，打破 River 的全屏幂等锁。
+                                    // River 只有看到 Fullscreen -> Normal 的真实跃迁，
+                                    // 才会在下一阶段重新下发 configure。
+                                    debug!(
+                                        "-> [Fullscreen] Breaking idempotent lock: exit_fullscreen for window {:?} (correction {}/{})",
+                                        w.id, w.layout_retry_count, MAX_LAYOUT_RETRIES
+                                    );
+                                    w.window.exit_fullscreen();
+                                    w.window.inform_not_fullscreen();
+                                    w.is_fullscreen_applied = false;
+                                    w.fullscreen_output = None;
+                                    w.fullscreen_sync = FullscreenSyncState::Reapplying;
+                                    // 触发下一拍 manage：下一拍执行第二阶段
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
+                                }
+                                FullscreenSyncState::Reapplying => {
+                                    // 第二阶段：重新进入全屏。River 看到 Normal -> Fullscreen
+                                    // 的真实跃迁，会强制向客户端下发全新的全屏 configure。
+                                    debug!(
+                                        "-> [Fullscreen] Re-applying fullscreen for window {:?}",
+                                        w.id
+                                    );
+                                    w.window.fullscreen(&out_obj);
+                                    w.window.inform_fullscreen();
+                                    w.is_fullscreen_applied = true;
+                                    w.fullscreen_output = w.output.clone();
+                                    w.fullscreen_sync = FullscreenSyncState::Synced;
+                                    w.last_proposed_w = 0;
+                                    w.last_proposed_h = 0;
+                                }
+                                FullscreenSyncState::Synced => {
+                                    // 首次进入全屏，或全屏窗口被投递到另一个显示器（out_changed）。
+                                    let out_changed = w.fullscreen_output.as_ref() != w.output.as_ref();
+                                    if !w.is_fullscreen_applied || out_changed {
+                                        w.window.fullscreen(&out_obj);
+                                        w.window.inform_fullscreen();
+                                        w.is_fullscreen_applied = true;
+                                        w.fullscreen_output = w.output.clone();
+                                        w.layout_retry_count = 0;
+                                        w.layout_retry_pending = false;
+                                        w.last_proposed_w = 0;
+                                        w.last_proposed_h = 0;
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -638,8 +779,38 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             w.window.exit_fullscreen();
                             w.window.inform_not_fullscreen();
                             w.is_fullscreen_applied = false;
+                            w.fullscreen_output = None;
+                            w.layout_retry_count = 0;
+                            w.layout_retry_pending = false;
                             w.last_proposed_w = 0;
                             w.last_proposed_h = 0;
+                        }
+                        // 无论是否曾经生效，都解除全屏纠偏状态机，避免残留状态。
+                        w.fullscreen_sync = FullscreenSyncState::Synced;
+                    }
+                }
+
+                // --- 【主动预防：向窗口下发尺寸边界 (river v4+)】 ---
+                // set_dimension_bounds 会被 River 转换成 xdg_toplevel.configure_bounds，
+                // 让 mpv 等 HiDPI 客户端在首帧之前就知道屏幕逻辑上限，从源头降低
+                // 首帧按错误 buffer_scale 分配缓冲区的概率。
+                if state.river_wm_version >= 4 {
+                    for w in state.windows.iter_mut() {
+                        let out_name = match &w.output {
+                            Some(o) => o.clone(),
+                            None => continue,
+                        };
+                        if let Some(out_data) = state.outputs.get(&out_name) {
+                            let (bw, bh) = (out_data.full_area.w, out_data.full_area.h);
+                            if bw > 0 && bh > 0 {
+                                // 仅在推荐尺寸发生变化时才下发，从而支持：
+                                //  - 窗口跨屏（不同分辨率/缩放）
+                                //  - 显示器分辨率或缩放被动态调整（如 wlr-randr）
+                                if Some((bw, bh)) != w.last_dimension_bounds {
+                                    w.window.set_dimension_bounds(bw, bh);
+                                    w.last_dimension_bounds = Some((bw, bh));
+                                }
+                            }
                         }
                     }
                 }
@@ -671,26 +842,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
 
                 // 4. 焦点确认：告诉 River 真正把键盘给谁
+                // 注意：这里不再通过“清除焦点 / 恢复焦点”来试图唤醒尺寸冻结的客户端。
+                // 尺寸纠正统一交给 propose_dimensions / fullscreen + layout_retry_count 处理，
+                // 焦点只表达“谁应该拥有键盘焦点”这一件事。
                 if let Some(f_id) = &state.focused_window {
                     if let Some(w_data) = state.windows.iter().find(|w| &w.id == f_id) {
                         if (w_data.tags & state.focused_tags) != 0 {
                             if let Some(seat) = &state.main_seat {
-                                // 如果处于重试状态，我们玩个把戏：奇数次清除焦点，偶数次给焦点
-                                // 这模拟了用户的“切换焦点”操作，能有效治愈 Electron/mpv 的尺寸冻结症
-                                if w_data.layout_retry_count > 0 {
-                                    if w_data.layout_retry_count % 2 != 0 {
-                                        debug!("Odd times: Pretending to lose focus");
-                                        // 奇数次：假装失去焦点
-                                        seat.clear_focus();
-                                    } else {
-                                        debug!("Even times: regain focus");
-                                        // 偶数次：重新获得焦点
-                                        seat.focus_window(&w_data.window);
-                                    }
-                                } else {
-                                    // 正常情况：直接给焦点
-                                    seat.focus_window(&w_data.window);
-                                }
+                                seat.focus_window(&w_data.window);
                             }
                         }
                     }
@@ -894,13 +1053,26 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         },
                                     );
 
-                                    if w_data.last_proposed_w != propose_w
-                                        || w_data.last_proposed_h != propose_h
-                                        || w_data.layout_retry_count > 0
-                                    {
-                                        window.propose_dimensions(propose_w, propose_h);
-                                        w_data.last_proposed_w = propose_w;
-                                        w_data.last_proposed_h = propose_h;
+                                    // 全屏窗口（无论是否已生效）的尺寸都由 fullscreen() 决定，
+                                    // 绝不能用平铺几何去 propose：否则在首帧阶段会给客户端塞一个
+                                    // 半屏尺寸，诱发 HiDPI 客户端的 buffer_scale 误判。
+                                    if !w_data.is_fullscreen {
+                                        let size_changed = w_data.last_proposed_w != propose_w
+                                            || w_data.last_proposed_h != propose_h;
+                                        if size_changed {
+                                            // 目标尺寸变了：这是一次全新的尝试，重置重试预算
+                                            w_data.layout_retry_count = 0;
+                                            w_data.layout_retry_pending = false;
+                                        }
+                                        // 目标尺寸变化时提议一次；若客户端刚上报了一个不符的尺寸
+                                        // （layout_retry_pending），再补发一次提议。
+                                        // river 保证每个 propose_dimensions 都会回一个 dimensions 事件。
+                                        if size_changed || w_data.layout_retry_pending {
+                                            window.propose_dimensions(propose_w, propose_h);
+                                            w_data.last_proposed_w = propose_w;
+                                            w_data.last_proposed_h = propose_h;
+                                            w_data.layout_retry_pending = false;
+                                        }
                                     }
                                     window.set_tiled(
                                         crate::protocol::river_wm::river_window_v1::Edges::all(),
@@ -961,13 +1133,22 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             (target_geo.w, target_geo.h)
                         };
 
-                        if w_data.last_proposed_w != propose_w
-                            || w_data.last_proposed_h != propose_h
-                            || w_data.layout_retry_count > 0
-                        {
-                            w_data.window.propose_dimensions(propose_w, propose_h);
-                            w_data.last_proposed_w = propose_w;
-                            w_data.last_proposed_h = propose_h;
+                        // 同样：全屏窗口（含首帧未生效阶段）由 fullscreen() 决定尺寸，
+                        // 绝不能走 propose_dimensions 塞入半屏 float_geo。
+                        if !w_data.is_fullscreen {
+                            let size_changed = w_data.last_proposed_w != propose_w
+                                || w_data.last_proposed_h != propose_h;
+                            if size_changed {
+                                // 目标尺寸变了：这是一次全新的尝试，重置重试预算
+                                w_data.layout_retry_count = 0;
+                                w_data.layout_retry_pending = false;
+                            }
+                            if size_changed || w_data.layout_retry_pending {
+                                w_data.window.propose_dimensions(propose_w, propose_h);
+                                w_data.last_proposed_w = propose_w;
+                                w_data.last_proposed_h = propose_h;
+                                w_data.layout_retry_pending = false;
+                            }
                         }
 
                         let is_focused = state.focused_window.as_ref() == Some(&w_data.id);
@@ -1300,6 +1481,14 @@ impl Dispatch<RiverOutputV1, ()> for AppState {
                 OutEvent::Removed => {
                     proxy.destroy();
                 }
+                // --- v5: 输出当前的录屏会话数量 ---
+                OutEvent::CaptureSessions { count } => {
+                    debug!(
+                        "-> [Event] Output {:?} capture sessions: {}",
+                        proxy.id(),
+                        count
+                    );
+                }
                 _ => {}
             }
         }
@@ -1625,6 +1814,13 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                     // --- 1. 全屏窗口处理 ---
                     if w.is_fullscreen {
+                        // 全屏纠偏是二阶段的：当状态机处于 Resetting/Reapplying 时，
+                        // 客户端上报的中间尺寸（退出全屏后的 tiled/float 尺寸）并不是错误，
+                        // 必须直接忽略，否则会误触发第二轮纠偏，造成乒乓震荡。
+                        if w.fullscreen_sync != FullscreenSyncState::Synced {
+                            return;
+                        }
+
                         let mut expected_w = 0;
                         let mut expected_h = 0;
                         if let Some(out_name) = &w.output {
@@ -1634,22 +1830,66 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             }
                         }
 
-                        if expected_w > 0 && expected_h > 0 {
+                        // 显示器信息尚未就绪（窗口刚创建、热插拔或启动瞬态）：
+                        // 此时 expected 为 0，dw/dh 必然误判为尺寸错误并浪费纠错预算，
+                        // 甚至过早触发 Resetting。显示器未就绪前暂不评估全屏尺寸。
+                        if expected_w <= 0 || expected_h <= 0 {
+                            return;
+                        }
+
+                        // 显示器分辨率/缩放变动（拔插外接屏、wlr-randr 调整）时，
+                        // 期望满屏尺寸会变化。重置纠错预算，让此前耗尽重试而沉默的
+                        // 全屏窗口重新获得自愈机会（Edge Case 4）。
+                        if Some((expected_w, expected_h)) != w.last_expected_size {
+                            w.last_expected_size = Some((expected_w, expected_h));
+                            w.layout_retry_count = 0;
+                        }
+
+                        {
                             let dw = (width as i32 - expected_w).abs();
                             let dh = (height as i32 - expected_h).abs();
 
                             if dw > 2 || dh > 2 {
                                 // 全屏窗口的尺寸是瞬间完成的，没有中间过渡帧。
-                                // 只要它报的不是物理满屏尺寸，立刻启动心脏除颤，决不能等动画结束！
-                                if w.layout_retry_count < 3 {
-                                    w.layout_retry_count += 1;
-                                    if let Some(wm) = &state.river_wm {
-                                        // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::Dimensions.is_fullscreen");
-                                        wm.manage_dirty();
+                                // 纠错流程本身由 ManageStart 的两阶段状态机完成：
+                                //   Resetting  -> exit_fullscreen 打破 River 幂等锁
+                                //   Reapplying -> 重新 fullscreen，River 强制下发新 configure
+                                // 这里只负责推进计数、跃迁状态并触发 manage_dirty，避免无限循环。
+                                match decide_size_retry(&mut w.layout_retry_count) {
+                                    RetryDecision::Retry => {
+                                        debug!(
+                                            "-> [Fullscreen] Window {:?} reported {}x{}, expected {}x{} (correction {}/{})",
+                                            proxy.id(),
+                                            width,
+                                            height,
+                                            expected_w,
+                                            expected_h,
+                                            w.layout_retry_count,
+                                            MAX_LAYOUT_RETRIES
+                                        );
+                                        // 交给下一个 manage 序列执行 exit_fullscreen
+                                        w.fullscreen_sync = FullscreenSyncState::Resetting;
+                                        if let Some(wm) = &state.river_wm {
+                                            wm.manage_dirty();
+                                        }
                                     }
+                                    RetryDecision::GiveUp => {
+                                        warn!(
+                                            "-> [Fullscreen] Window {:?} refuses to resize to {}x{} (reported {}x{}), giving up",
+                                            proxy.id(),
+                                            expected_w,
+                                            expected_h,
+                                            width,
+                                            height
+                                        );
+                                    }
+                                    RetryDecision::Ignore => {}
                                 }
                             } else {
-                                w.layout_retry_count = 0; // 尺寸正常，解除警报
+                                // 尺寸正常，解除警报
+                                w.layout_retry_count = 0;
+                                w.layout_retry_pending = false;
+                                w.fullscreen_sync = FullscreenSyncState::Synced;
                             }
                         }
                         return;
@@ -1664,6 +1904,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             w.float_geo.h = height as i32;
                         }
                         w.layout_retry_count = 0;
+                        w.layout_retry_pending = false;
                         return;
                     }
 
@@ -1675,23 +1916,44 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
 
                             if dw > 2 || dh > 2 {
                                 // --- 【加上 !is_animating 免疫盾】 ---
+                                // 纠错请求本身由 ManageStart 重发 propose_dimensions 完成，
+                                // 这里只负责推进计数与限流，避免无限 manage_dirty。
                                 if !is_animating {
-                                    if w.layout_retry_count < 3 {
-                                        w.layout_retry_count += 1;
-                                        if let Some(wm) = &state.river_wm {
-                                            // info!("-> MANAGE_DIRTY TRIGGERED BY:Dispatch<RiverWindowV1>.WinEvent::Dimensions.!w.is_fullscreen");
-                                            wm.manage_dirty();
+                                    match decide_size_retry(&mut w.layout_retry_count) {
+                                        RetryDecision::Retry => {
+                                            debug!(
+                                                "-> [Tiling] Window {:?} reported {}x{}, expected {}x{} (retry {}/{})",
+                                                proxy.id(),
+                                                width,
+                                                height,
+                                                geo.w,
+                                                geo.h,
+                                                w.layout_retry_count,
+                                                MAX_LAYOUT_RETRIES
+                                            );
+                                            // 交给下一个 manage 序列补发 propose_dimensions
+                                            w.layout_retry_pending = true;
+                                            if let Some(wm) = &state.river_wm {
+                                                wm.manage_dirty();
+                                            }
                                         }
-                                    } else if w.layout_retry_count == 50 {
-                                        warn!(
-                                            "-> Window {:?} refuses to accept layout geometry.",
-                                            proxy.id()
-                                        );
-                                        w.layout_retry_count += 1;
+                                        RetryDecision::GiveUp => {
+                                            warn!(
+                                                "-> [Tiling] Window {:?} refuses to accept layout geometry {}x{} (reported {}x{}), giving up",
+                                                proxy.id(),
+                                                geo.w,
+                                                geo.h,
+                                                width,
+                                                height
+                                            );
+                                        }
+                                        RetryDecision::Ignore => {}
                                     }
                                 }
                             } else {
+                                // 尺寸正常，解除警报
                                 w.layout_retry_count = 0;
+                                w.layout_retry_pending = false;
                             }
                         }
                     }
@@ -1759,6 +2021,32 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     w.title = title;
                 }
                 state.apply_window_rules(&id);
+            }
+            // --- v4: 窗口自身的呈现偏好（vsync / async 撕裂） ---
+            // 目前只记录日志，暂不驱动行为。
+            WinEvent::PresentationHint { hint } => {
+                debug!(
+                    "-> [Event] Window ID {:?} presentation hint: {:?}",
+                    proxy.id(),
+                    hint
+                );
+            }
+            // --- v4: 窗口全局唯一标识（不复用，可与 ext-foreign-toplevel 对齐） ---
+            // 目前只记录日志，暂不参与窗口规则匹配。
+            WinEvent::Identifier { identifier } => {
+                debug!(
+                    "-> [Event] Window ID {:?} identifier: {}",
+                    proxy.id(),
+                    identifier
+                );
+            }
+            // --- v5: 窗口当前的录屏会话数量 ---
+            WinEvent::CaptureSessions { count } => {
+                debug!(
+                    "-> [Event] Window ID {:?} capture sessions: {}",
+                    proxy.id(),
+                    count
+                );
             }
             _ => {}
         }
@@ -2171,6 +2459,13 @@ impl Dispatch<RiverInputDeviceV1, ()> for AppState {
                 info!("-> Found input device name: ID {:?} = {}", proxy.id(), name);
                 state.device_names.insert(proxy.id(), name);
             }
+            // --- v2: 该设备的所有属性已发送完毕（可用于把多次事件视为原子更新） ---
+            InputDeviceEvent::Done => {
+                debug!(
+                    "-> [Event] Input device {:?} state is complete",
+                    proxy.id()
+                );
+            }
             _ => {}
         }
     }
@@ -2241,6 +2536,17 @@ impl Dispatch<RiverXkbKeyboardV1, ()> for AppState {
                 // 清理逻辑
                 let id = proxy.id();
                 state.keyboards.retain(|k| k.id() != id);
+            }
+            // --- v2: 该键盘的所有属性已发送完毕（可用于把多次事件视为原子更新） ---
+            KbEvent::Done => {
+                debug!("-> [Event] Keyboard {:?} state is complete", proxy.id());
+            }
+            // --- v3: Scrolllock 状态（目前只记录，不做行为） ---
+            KbEvent::ScrolllockEnabled => {
+                debug!("-> [Event] Keyboard {:?} scrolllock enabled", proxy.id());
+            }
+            KbEvent::ScrolllockDisabled => {
+                debug!("-> [Event] Keyboard {:?} scrolllock disabled", proxy.id());
             }
             _ => {}
         }

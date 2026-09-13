@@ -32,14 +32,9 @@
     The key words "must", "must not", "required", "shall", "shall not",
     "should", "should not", "recommended", "may", and "optional" in this
     document are to be interpreted as described in IETF RFC 2119.
-
-    Warning! The protocol described in this file is currently in the testing
-    phase. Backward compatible changes may be added together with the
-    corresponding interface version bump. Backward incompatible changes can only
-    be done by creating a new major version of the extension.
   </description>
 
-  <interface name="river_window_manager_v1" version="3">
+  <interface name="river_window_manager_v1" version="5">
     <description summary="window manager global interface">
       This global interface should only be advertised to the window manager
       process. Only one window management client may be active at a time. The
@@ -47,14 +42,14 @@
 
       There are two disjoint categories of state managed by this protocol:
 
-      Window management state influences the communication between the server
-      and individual window clients (e.g. xdg_toplevels). Window management
+      Window management state influences the communication between the
+      compositor and individual windows (e.g. xdg_toplevels). Window management
       state includes window dimensions, fullscreen state, keyboard focus,
       keyboard bindings, and more.
 
       Rendering state only affects the rendered output of the compositor and
-      does not influence communication between the server and individual window
-      clients. Rendering state includes the position and rendering order of
+      does not influence communication between the compositor and individual
+      windows. Rendering state includes the position and rendering order of
       windows, shell surfaces, decoration surfaces, borders, and more.
 
       Window management state may only be modified by the window manager as part
@@ -216,8 +211,8 @@
 
     <event name="render_start">
       <description summary="start a render sequence">
-        This event indicates that the server has sent all river_node_v1.position
-        and river_window_v1.dimensions events necessary.
+        This event indicates that the server has sent all
+        river_window_v1.dimensions events necessary.
 
         In response to this event, the client should make requests modifying
         rendering state as it chooses. Then, the client must make the
@@ -251,6 +246,10 @@
         The window manager may wish to restrict which key bindings are available
         while locked or otherwise use this information.
 
+        If the session is currently locked when the river_window_manager_v1
+        object is created, the session_locked event will be sent in the first
+        manage sequence.
+
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
@@ -272,7 +271,7 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="id" type="new_id" interface="river_window_v1"/>
+      <arg name="id" type="new_id" interface="river_window_v1" summary="new window"/>
     </event>
 
     <event name="output">
@@ -284,7 +283,7 @@
         events as well as a manage_start event after all other new state has
         been sent by the server.
       </description>
-      <arg name="id" type="new_id" interface="river_output_v1"/>
+      <arg name="id" type="new_id" interface="river_output_v1" summary="new output"/>
     </event>
 
     <event name="seat">
@@ -294,7 +293,7 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="id" type="new_id" interface="river_seat_v1"/>
+      <arg name="id" type="new_id" interface="river_seat_v1" summary="new seat"/>
     </event>
 
     <request name="get_shell_surface">
@@ -305,20 +304,34 @@
         Providing a wl_surface which already has a role or already has a buffer
         attached or committed is a protocol error.
       </description>
-      <arg name="id" type="new_id" interface="river_shell_surface_v1"/>
-      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="id" type="new_id" interface="river_shell_surface_v1"
+        summary="new river shell surface"/>
+      <arg name="surface" type="object" interface="wl_surface"
+        summary="base surface"/>
+    </request>
+
+    <request name="exit_session" since="4">
+      <description summary="exit the Wayland session">
+        End the current Wayland session and exit the compositor.
+        All Wayland clients running in the current session, including
+        the window manager, will be disconnected.
+
+        Window managers should only make this request if the user explicitly
+        asks to exit the Wayland session, not for example on normal window
+        manager termination.
+      </description>
     </request>
   </interface>
 
-  <interface name="river_window_v1" version="3">
+  <interface name="river_window_v1" version="5">
     <description summary="a logical window">
       This represents a logical window. For example, a window may correspond to
       an xdg_toplevel or Xwayland window.
 
       A newly created window will not be displayed until the window manager
-      proposes window dimensions with the propose_dimensions request as part of
-      a manage sequence, the server replies with a dimensions event as part of
-      a render sequence, and that render sequence is finished.
+      makes a propose_dimensions or fullscreen request as part of a manage
+      sequence, the server replies with a dimensions event as part of a render
+      sequence, and that render sequence is finished.
     </description>
 
     <enum name="error">
@@ -379,7 +392,7 @@
         It is a protocol error to make this request more than once for a single
         window.
       </description>
-      <arg name="id" type="new_id" interface="river_node_v1"/>
+      <arg name="id" type="new_id" interface="river_node_v1" summary="new node"/>
     </request>
 
     <event name="dimensions_hint">
@@ -392,16 +405,16 @@
         to 0. A value of 0 indicates that the window has no preference for that
         value.
 
-        The min_width/min_height must be strictly less than or equal to the
-        max_width/max_height.
+        If the max_width/max_height is greater than 0, the min_width/min_height
+        must be strictly less than or equal to the max_width/max_height.
 
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="min_width" type="int"/>
-      <arg name="min_height" type="int"/>
-      <arg name="max_width" type="int"/>
-      <arg name="max_height" type="int"/>
+      <arg name="min_width" type="int" summary="minimum width"/>
+      <arg name="min_height" type="int" summary="minimum height"/>
+      <arg name="max_width" type="int" summary="maximum width"/>
+      <arg name="max_height" type="int" summary="maximum height"/>
     </event>
 
     <event name="dimensions">
@@ -417,12 +430,15 @@
         This event is sent as part of a render sequence before the render_start
         event.
 
-        It may be sent due to a propose_dimensions request in a previous manage
-        sequence or because a window independently decides to change its
-        dimensions.
+        It may be sent due to a propose_dimensions or fullscreen request in a
+        previous manage sequence or because a window independently decides to
+        change its dimensions.
+
+        The window will not be displayed until the first dimensions event is
+        received and the render sequence is finished.
       </description>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="width" type="int" summary="window content width"/>
+      <arg name="height" type="int" summary="window content height"/>
     </event>
 
     <request name="propose_dimensions">
@@ -442,10 +458,9 @@
         When a propose_dimensions request is made, the server must send a
         dimensions event in response as soon as possible. It may not be possible
         to send a dimensions event in the very next render sequence if, for
-        example, the window takes too long to respond to the first proposed
+        example, the window takes too long to respond to the proposed
         dimensions. In this case, the server will send the dimensions event in a
-        future render sequence. The window will not be displayed until the first
-        dimensions event is received and the render sequence is finished.
+        future render sequence.
 
         Note that the dimensions of a river_window_v1 refer to the dimensions of
         the window content and are unaffected by the presence of borders or
@@ -454,8 +469,8 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="width" type="int" summary="proposed content width"/>
+      <arg name="height" type="int" summary="proposed content height"/>
     </request>
 
     <request name="hide">
@@ -467,7 +482,7 @@
         the hide request.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
 
@@ -481,7 +496,7 @@
         the hide request.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
 
@@ -496,7 +511,8 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="app_id" type="string" allow-null="true"/>
+      <arg name="app_id" type="string" allow-null="true"
+        summary="window application ID"/>
     </event>
 
     <event name="title">
@@ -510,7 +526,7 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="title" type="string" allow-null="true"/>
+      <arg name="title" type="string" allow-null="true" summary="window title"/>
     </event>
 
     <event name="parent">
@@ -530,7 +546,7 @@
         state has been sent by the server.
       </description>
       <arg name="parent" type="object" allow-null="true"
-        interface="river_window_v1"/>
+        interface="river_window_v1" summary="parent window, if any"/>
     </event>
 
     <enum name="decoration_hint">
@@ -555,7 +571,7 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="hint" type="uint" enum="decoration_hint"/>
+      <arg name="hint" type="uint" enum="decoration_hint" summary="decoration hint"/>
     </event>
 
     <request name="use_csd">
@@ -608,6 +624,11 @@
         The color is defined by four 32-bit RGBA values. Unless specified in
         another protocol extension, the RGBA values use pre-multiplied alpha.
 
+        The valid range for the RGBA values is from 0x00000000 to 0xffffffff.
+        These values are interpreted as a percentage:
+        - 0x00000000 means 0% of the given color component
+        - 0xffffffff means 100% of the given color component
+
         Setting the edges to none or the width to 0 disables the borders.
         Setting a negative width is a protocol error.
 
@@ -619,14 +640,14 @@
         presence of borders or decoration surfaces.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="edges" type="uint" enum="edges"/>
-      <arg name="width" type="int"/>
-      <arg name="r" type="uint"/>
-      <arg name="g" type="uint"/>
-      <arg name="b" type="uint"/>
-      <arg name="a" type="uint"/>
+      <arg name="edges" type="uint" enum="edges" summary="border edges"/>
+      <arg name="width" type="int" summary="border width"/>
+      <arg name="r" type="uint" summary="32-bit red value"/>
+      <arg name="g" type="uint" summary="32-bit green value"/>
+      <arg name="b" type="uint" summary="32-bit blue value"/>
+      <arg name="a" type="uint" summary="32-bit alpha value"/>
     </request>
 
     <request name="set_tiled">
@@ -645,11 +666,11 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="edges" type="uint" enum="edges"/>
+      <arg name="edges" type="uint" enum="edges" summary="tiled edges"/>
     </request>
 
     <request name="get_decoration_above">
-      <description summary="create a decoration surface above the window">
+      <description summary="create a decoration above the window in z-order">
         Create a decoration surface and assign the river_decoration_v1 role to
         the surface. The created decoration is placed above the window in
         rendering order, see the description of river_decoration_v1.
@@ -657,12 +678,14 @@
         Providing a wl_surface which already has a role or already has a buffer
         attached or committed is a protocol error.
       </description>
-      <arg name="id" type="new_id" interface="river_decoration_v1"/>
-      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="id" type="new_id" interface="river_decoration_v1"
+        summary="new decoration surface"/>
+      <arg name="surface" type="object" interface="wl_surface"
+        summary="base surface"/>
     </request>
 
     <request name="get_decoration_below">
-      <description summary="create a decoration surface below the window">
+      <description summary="create a decoration below the window in z-order">
         Create a decoration surface and assign the river_decoration_v1 role to
         the surface. The created decoration is placed below the window in
         rendering order, see the description of river_decoration_v1.
@@ -670,8 +693,10 @@
         Providing a wl_surface which already has a role or already has a buffer
         attached or committed is a protocol error.
       </description>
-      <arg name="id" type="new_id" interface="river_decoration_v1"/>
-      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="id" type="new_id" interface="river_decoration_v1"
+        summary="new decoration surface"/>
+      <arg name="surface" type="object" interface="wl_surface"
+        summary="base surface"/>
     </request>
 
     <event name="pointer_move_requested">
@@ -690,7 +715,8 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="seat" type="object" interface="river_seat_v1"/>
+      <arg name="seat" type="object" interface="river_seat_v1"
+        summary="requested seat"/>
     </event>
 
     <event name="pointer_resize_requested">
@@ -713,8 +739,10 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="seat" type="object" interface="river_seat_v1"/>
-      <arg name="edges" type="uint" enum="edges"/>
+      <arg name="seat" type="object" interface="river_seat_v1"
+        summary="requested seat"/>
+      <arg name="edges" type="uint" enum="edges"
+        summary="requested edges"/>
     </event>
 
     <request name="inform_resize_start">
@@ -766,7 +794,8 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="caps" type="uint" enum="capabilities"/>
+      <arg name="caps" type="uint" enum="capabilities"
+        summary="supported capabilities"/>
     </request>
 
     <event name="show_window_menu_requested">
@@ -796,7 +825,7 @@
         maximized.
 
         The window manager is free to honor this request using
-        river_window_v1.inform_maximize or ignore it.
+        river_window_v1.inform_maximized or ignore it.
 
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
@@ -844,7 +873,10 @@
     <event name="fullscreen_requested">
       <description summary="the window requested to be fullscreen">
         The xdg-shell protocol for example allows windows to request that they
-        be made fullscreen and allows them to provide an output preference.
+        be made fullscreen and allows them to provide an optional output hint.
+
+        If the output argument is null, the window has no preference and the
+        window manager should choose an output.
 
         The window manager is free to honor this request using
         river_window_v1.fullscreen or ignore it.
@@ -853,7 +885,7 @@
         state has been sent by the server.
       </description>
       <arg name="output" type="object" allow-null="true"
-        interface="river_output_v1" />
+        interface="river_output_v1" summary="fullscreen output requested"/>
     </event>
 
     <event name="exit_fullscreen_requested">
@@ -903,7 +935,8 @@
       <description summary="make the window fullscreen">
         Make the window fullscreen on the given output. If multiple windows are
         fullscreen on the same output at the same time only the "top" window in
-        rendering order shall be displayed.
+        rendering order shall be displayed. If the window is already fullscreen
+        on a different output, the window is switched to the new output.
 
         All river_shell_surface_v1 objects above the top fullscreen window in
         the rendering order will continue to be rendered.
@@ -912,6 +945,12 @@
         while it is fullscreen. The set_position and propose_dimensions requests
         shall not affect the current position and dimensions of a fullscreen
         window.
+
+        When a fullscreen request is made, the server must send a dimensions
+        event in response as soon as possible. It may not be possible to send a
+        dimensions event in the very next render sequence if, for example, the
+        window takes too long to respond. In this case, the server will send the
+        dimensions event in a future render sequence.
 
         The compositor will clip window content, decoration surfaces, and
         borders to the given output's dimensions while the window is fullscreen.
@@ -928,7 +967,8 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="output" type="object" interface="river_output_v1"/>
+      <arg name="output" type="object" interface="river_output_v1"
+        summary="fullscreen output"/>
     </request>
 
     <request name="exit_fullscreen">
@@ -979,12 +1019,12 @@
         Both set_clip_box and set_content_clip_box may be enabled simultaneously.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="x" type="int" summary="x relative to top left window corner"/>
+      <arg name="y" type="int" summary="y relative to top left window corner"/>
+      <arg name="width" type="int" summary="clip box width"/>
+      <arg name="height" type="int" summary="clip box height"/>
     </request>
 
     <event name="unreliable_pid" since="2">
@@ -1000,7 +1040,7 @@
         This event is sent once when the river_window_v1 is created and never
         sent again.
       </description>
-      <arg name="unreliable_pid" type="int"/>
+      <arg name="unreliable_pid" type="int" summary="unreliable PID"/>
     </event>
 
     <request name="set_content_clip_box" since="3">
@@ -1023,16 +1063,86 @@
         Both set_clip_box and set_content_clip_box may be enabled simultaneously.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="x" type="int" summary="x relative to top left window corner"/>
+      <arg name="y" type="int" summary="y relative to top left window corner"/>
+      <arg name="width" type="int" summary="clip box width"/>
+      <arg name="height" type="int" summary="clip box height"/>
     </request>
+
+    <event name="presentation_hint" since="4">
+      <description summary="presentation hint set by the window">
+        This event communicates the window's preferred presentation mode.
+
+        This event will be followed by a render_start event after all other new
+        state has been sent by the server.
+      </description>
+      <arg name="hint" type="uint" enum="river_output_v1.presentation_mode"
+        summary="presentation hint"/>
+    </event>
+
+    <event name="identifier" since="4">
+      <description summary="unique window identifier">
+        The identifier is a string that contains up to 32 printable ASCII bytes.
+        The identifier must not be an empty string.
+
+        It is compositor policy how the identifier is generated, but the following
+        properties must be upheld:
+
+        1. The identifier must uniquely identify the window. Two windows must not
+           share the same identifier.
+
+        2. The identifier must not be reused. This avoids races around window
+           creation/destruction when identifiers are used in out-of-band IPC.
+
+        If the compositor implements the ext-foreign-toplevel-list-v1 protocol,
+        the river_window_v1.identifier event must match the corresponding
+        ext_foreign_toplevel_handle_v1.identifier event.
+
+        This event is sent once when the river_window_v1 is created and never
+        sent again.
+      </description>
+      <arg name="identifier" type="string" summary="unique identifier"/>
+    </event>
+
+    <request name="set_dimension_bounds" since="4">
+      <description summary="recommend maximum dimensions to the window">
+        Recommend that the window keep its dimensions within a given
+        maximum width/height. This recommendation is only a hint and the window
+        may ignore it.
+
+        Setting the width and height to 0 indicates that there are no bounds
+        and is equivalent to having never made this request.
+
+        Setting width or height to a negative value is a protocol error.
+
+        The server should communicate this hint to an xdg_toplevel window with
+        the xdg_toplevel.configure_bounds event for example.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+      <arg name="max_width" type="int" summary="maximum width"/>
+      <arg name="max_height" type="int" summary="maximum height"/>
+    </request>
+
+    <event name="capture_sessions" since="5">
+      <description summary="window screen capture sessions">
+        This event informs the window manager of the number of active screen
+        capture sessions for the window.
+
+        This event is sent once when the river_window_v1 is created and again
+        whenever the number of capture sessions changes.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+      </description>
+      <arg name="count" type="uint" summary="count of screen capture sessions"/>
+    </event>
   </interface>
 
-  <interface name="river_decoration_v1" version="3">
+  <interface name="river_decoration_v1" version="5">
     <description summary="a window decoration">
       The rendering order of windows with decorations is follows:
 
@@ -1066,10 +1176,10 @@
         protocol and left up to the compositor.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
+      <arg name="x" type="int" summary="x relative to top left window corner"/>
+      <arg name="y" type="int" summary="y relative to top left window corner"/>
     </request>
 
     <request name="sync_next_commit">
@@ -1083,12 +1193,12 @@
         to do so is a protocol error.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
   </interface>
 
-  <interface name="river_shell_surface_v1" version="3">
+  <interface name="river_shell_surface_v1" version="5">
     <description summary="a surface for window manager UI">
       The window manager might use a shell surface to display a status bar,
       background image, desktop notifications, launcher, desktop menu, or
@@ -1116,7 +1226,7 @@
         It is a protocol error to make this request more than once for a single
         shell surface.
       </description>
-      <arg name="id" type="new_id" interface="river_node_v1"/>
+      <arg name="id" type="new_id" interface="river_node_v1" summary="new node"/>
     </request>
 
     <request name="sync_next_commit">
@@ -1130,12 +1240,12 @@
         so is a protocol error.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
   </interface>
 
-  <interface name="river_node_v1" version="3">
+  <interface name="river_node_v1" version="5">
     <description summary="a node in the render list">
       The render list is a list of nodes that determines the rendering order of
       the compositor. Nodes may correspond to windows or shell surfaces. The
@@ -1167,10 +1277,10 @@
         this protocol and left up to the compositor.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
+      <arg name="x" type="int" summary="global x coordinate"/>
+      <arg name="y" type="int" summary="global y coordinate"/>
     </request>
 
     <request name="place_top">
@@ -1179,7 +1289,7 @@
         render list.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
 
@@ -1189,7 +1299,7 @@
         render list.
 
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
     </request>
 
@@ -1200,10 +1310,19 @@
 
         Attempting to place a node above itself has no effect.
 
+        Given nodes A, B, C currently rendered in that order with C on top
+        and A on the bottom, the following example demonstrates the behavior
+        of this request and the meaning of "directly above":
+
+        1. A.place_above(C) -> B, C, A
+        2. A.place_above(B) -> B, A, C
+        3. B.place_above(A) -> A, B, C
+
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="other" type="object" interface="river_node_v1"/>
+      <arg name="other" type="object" interface="river_node_v1"
+        summary="other node"/>
     </request>
 
     <request name="place_below">
@@ -1213,14 +1332,23 @@
 
         Attempting to place a node below itself has no effect.
 
+        Given nodes A, B, C currently rendered in that order with C on top
+        and A on the bottom, the following example demonstrates the behavior
+        of this request and the meaning of "directly below":
+
+        1. C.place_below(A) -> C, A, B
+        2. C.place_below(B) -> A, C, B
+        3. B.place_below(C) -> A, B, C
+
         This request modifies rendering state and may only be made as part of a
-        render sequence, see the river_window_manager_v1 description.
+        manage or render sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="other" type="object" interface="river_node_v1"/>
+      <arg name="other" type="object" interface="river_node_v1"
+        summary="other node"/>
     </request>
   </interface>
 
-  <interface name="river_output_v1" version="3">
+  <interface name="river_output_v1" version="5">
     <description summary="a logical output">
       An area in the compositor's logical coordinate space that should be
       treated as a single output for window management purposes. This area may
@@ -1270,7 +1398,7 @@
         mapping between wl_output and river_output_v1 objects.
 
         The global_remove event for the corresponding wl_output may be sent
-        before the river_output_v1.remove event. This is due to the fact that
+        before the river_output_v1.removed event. This is due to the fact that
         river_output_v1 state changes are synced to the river window management
         manage sequence while changes to globals are not.
 
@@ -1297,8 +1425,8 @@
         cause the areas of multiple logical outputs to overlap when the
         corresponding manage_start event is received.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
+      <arg name="x" type="int" summary="global x coordinate"/>
+      <arg name="y" type="int" summary="global y coordinate"/>
     </event>
 
     <event name="dimensions">
@@ -1317,21 +1445,77 @@
         cause the areas of multiple logical outputs to overlap when the
         corresponding manage_start event is received.
       </description>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="width" type="int" summary="output width"/>
+      <arg name="height" type="int" summary="output height"/>
+    </event>
+
+    <enum name="error" since="4">
+      <entry name="invalid_presentation_mode" value="0" since="4"
+        summary="invalid presentation mode enum value"/>
+    </enum>
+
+    <enum name="presentation_mode" since="4">
+      <entry name="vsync" value="0">
+        <description summary="tearing-free presentation">
+          Output page-flips should be synchronized to the vertical blanking
+          period, eliminating tearing. This is the default presentation mode.
+        </description>
+      </entry>
+      <entry name="async" value="1">
+        <description summary="asynchronous presentation">
+          Output page-flips should not be synchronized to the vertical blanking
+          period, visual screen tearing may occur.
+        </description>
+      </entry>
+    </enum>
+
+    <request name="set_presentation_mode" since="4">
+      <description summary="set the preferred presentation mode">
+        Set the preferred presentation mode of the output. The compositor should
+        always respect the preference of the window manager if possible. If this
+        request is never made, the preferred presentation mode is vsync.
+
+        This request modifies rendering state and may only be made as part of a
+        manage or render sequence, see the river_window_manager_v1 description.
+      </description>
+      <arg name="mode" type="uint" enum="presentation_mode"
+        summary="preferred presentation mode"/>
+    </request>
+
+    <event name="capture_sessions" since="5">
+      <description summary="output screen capture sessions">
+        This event informs the window manager of the number of active screen
+        capture sessions for the output.
+
+        This event is sent once when the river_output_v1 is created and again
+        whenever the number of capture sessions changes.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+      </description>
+      <arg name="count" type="uint" summary="count of screen capture sessions"/>
     </event>
   </interface>
 
-  <interface name="river_seat_v1" version="3">
+  <interface name="river_seat_v1" version="5">
     <description summary="a window management seat">
       This object represents a single user's collection of input devices. It
       allows the window manager to route keyboard input to windows, get
-      high-level information about pointer input, define keyboard and pointer
-      bindings, etc.
+      high-level information about pointer input, define pointer bindings, etc.
 
-      TODO:
-        - touch input
-        - tablet input
+      For keyboard bindings, see the river-xkb-bindings-v1 protocol.
+
+      Since version 4: The cursor surface/shape set by the window manager on the
+      wl_pointer of this seat is used when no client has pointer focus, for
+      example during a pointer operation. Since the window manager is allowed to
+      set cursor surface/shape even when it does not have pointer focus, the
+      compositor must ignore the serial argument of wl_pointer.set_cursor and
+      wp_cursor_shape_device_v1.set_shape requests made by the window manager.
+
+      The most recent cursor surface/shape set by the window manager is
+      remembered by the compositor and restored whenever no client has pointer
+      focus. If the window manager never sets a cursor surface/shape, the
+      "default" shape is used.
     </description>
 
     <request name="destroy" type="destructor">
@@ -1372,7 +1556,7 @@
         mapping between wl_seat and river_seat_v1 objects.
 
         The global_remove event for the corresponding wl_seat may be sent before
-        the river_seat_v1.remove event. This is due to the fact that
+        the river_seat_v1.removed event. This is due to the fact that
         river_seat_v1 state changes are synced to the river window management
         manage sequence while changes to globals are not.
 
@@ -1390,7 +1574,8 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="window" type="object" interface="river_window_v1"/>
+      <arg name="window" type="object" interface="river_window_v1"
+        summary="window to focus"/>
     </request>
 
     <request name="focus_shell_surface">
@@ -1401,7 +1586,8 @@
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"/>
+      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"
+        summary="shell surface to focus"/>
     </request>
 
     <request name="clear_focus">
@@ -1430,7 +1616,8 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="window" type="object" interface="river_window_v1"/>
+      <arg name="window" type="object" interface="river_window_v1"
+        summary="window entered"/>
     </event>
 
     <event name="pointer_leave">
@@ -1461,7 +1648,8 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="window" type="object" interface="river_window_v1"/>
+      <arg name="window" type="object" interface="river_window_v1"
+        summary="window interacted with"/>
     </event>
 
     <event name="shell_surface_interaction">
@@ -1483,7 +1671,8 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"/>
+      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"
+        summary="shell surface interacted with"/>
     </event>
 
     <request name="op_start_pointer">
@@ -1501,6 +1690,11 @@
         dimensions based off of the op_delta events.
 
         This request is ignored if an operation is already in progress.
+
+        The compositor must ensure that no client has pointer focus from this
+        seat during the pointer operation. This means that the window manager
+        has control over the pointer's cursor surface/shape during the pointer
+        operation. See the river_seat_v1 description.
 
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
@@ -1565,8 +1759,8 @@
 
     <request name="get_pointer_binding">
       <description summary="define a new pointer binding">
-        Define a pointer binding in terms of a pointer button, modifiers, and
-        other configurable properties.
+        Define a pointer binding in terms of a pointer button, keyboard
+        modifiers, and other configurable properties.
 
         The button argument is a Linux input event code defined in the
         linux/input-event-codes.h header file (e.g. BTN_RIGHT).
@@ -1574,9 +1768,11 @@
         The new pointer binding is not enabled until initial configuration is
         completed and the enable request is made during a manage sequence.
       </description>
-      <arg name="id" type="new_id" interface="river_pointer_binding_v1"/>
+      <arg name="id" type="new_id" interface="river_pointer_binding_v1"
+        summary="new pointer binding"/>
       <arg name="button" type="uint" summary="a Linux input event code"/>
-      <arg name="modifiers" type="uint" enum="modifiers"/>
+      <arg name="modifiers" type="uint" enum="modifiers"
+        summary="keyboard modifiers"/>
     </request>
 
     <request name="set_xcursor_theme" since="2">
@@ -1588,8 +1784,8 @@
         Note: The window manager may also wish to set the XCURSOR_THEME and
         XCURSOR_SIZE environment variable for programs it starts.
       </description>
-      <arg name="name" type="string"/>
-      <arg name="size" type="uint"/>
+      <arg name="name" type="string" summary="xcursor theme name"/>
+      <arg name="size" type="uint" summary="cursor size"/>
     </request>
 
     <event name="pointer_position" since="2">
@@ -1604,8 +1800,8 @@
         sequence unless there is no change in x/y position since the last time this
         event was sent.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
+      <arg name="x" type="int" summary="global x coordinate"/>
+      <arg name="y" type="int" summary="global y coordinate"/>
     </event>
 
     <request name="pointer_warp" since="3">
@@ -1616,15 +1812,19 @@
         If the given position is outside the bounds of all outputs, the pointer
         will be warped to the closest point inside an output instead.
 
+        If an op_start_pointer request is made during the same manage sequence
+        as a pointer_warp request, the warp is applied first by the server
+        regardless of the relative ordering of the two requests.
+
         This request modifies window management state and may only be made as
         part of a manage sequence, see the river_window_manager_v1 description.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
+      <arg name="x" type="int" summary="global x coordinate"/>
+      <arg name="y" type="int" summary="global y coordinate"/>
     </request>
   </interface>
 
-  <interface name="river_pointer_binding_v1" version="3">
+  <interface name="river_pointer_binding_v1" version="5">
     <description summary="configure a pointer binding, receive trigger events">
       This object allows the window manager to configure a pointer binding and
       receive events when the binding is triggered.

@@ -23,18 +23,13 @@
     IN THE SOFTWARE.
   </copyright>
 
-  <description summary="layer shell support for river">
+  <description summary="optional layer shell support">
     This protocol allows the river-window-management-v1 window manager to
-    support the wlr-layer-shell-v1 protocol.
+    support the wlr-layer-shell-unstable-v1 protocol.
 
     The key words "must", "must not", "required", "shall", "shall not",
     "should", "should not", "recommended", "may", and "optional" in this
     document are to be interpreted as described in IETF RFC 2119.
-
-    Warning! The protocol described in this file is currently in the testing
-    phase. Backward compatible changes may be added together with the
-    corresponding interface version bump. Backward incompatible changes can only
-    be done by creating a new major version of the extension.
   </description>
 
   <interface name="river_layer_shell_v1" version="1">
@@ -108,10 +103,10 @@
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
+      <arg name="x" type="int" summary="global x coordinate"/>
+      <arg name="y" type="int" summary="global y coordinate"/>
+      <arg name="width" type="int" summary="area width"/>
+      <arg name="height" type="int" summary="area height"/>
     </event>
 
     <request name="set_default">
@@ -147,7 +142,7 @@
     </request>
 
     <event name="focus_exclusive">
-      <description summary="">
+      <description summary="layer shell surface has exclusive focus">
         A layer shell surface will be given exclusive keyboard focus at the end
         of the manage sequence in which this event is sent. The window manager
         may want to update window decorations or similar to indicate that no
@@ -162,7 +157,7 @@
     </event>
 
     <event name="focus_non_exclusive">
-      <description summary="">
+      <description summary="layer shell surface wants non-exclusive focus">
         A layer shell surface will be given non-exclusive keyboard focus at the
         end of the manage sequence in which this event is sent. The window
         manager may want to update window decorations or similar to indicate
@@ -173,13 +168,17 @@
         focus during the same manage sequence in which this event is sent, the
         layer surface will not be focused.
 
+        If the layer surface with non-exclusive focus is closed or the window
+        manager chooses to move focus away from the layer surface, a focus_none
+        event will be sent in the next manage sequence.
+
         This event will be followed by a manage_start event after all other new
         state has been sent by the server.
       </description>
     </event>
 
     <event name="focus_none">
-      <description summary="">
+      <description summary="no layer shell surface has focus">
         No layer shell surface will have keyboard focus at the end of the manage
         sequence in which this event is sent. The window manager may want to
         return focus to whichever window last had focus, for example.

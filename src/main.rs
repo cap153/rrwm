@@ -77,6 +77,7 @@ fn main() {
         config: config,
         needs_reload: false,
         river_wm: None,
+        river_wm_version: 0,
         windows: Vec::new(),
         outputs: HashMap::new(),
         main_seat: None,
