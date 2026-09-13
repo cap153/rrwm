@@ -962,6 +962,9 @@ impl AppState {
                                     w.float_geo.h = (w.float_geo.h + delta).max(50);
                                 }
                             }
+                            // 用户手动调整过大小：尺寸视为显式指定，且不再自动居中
+                            w.has_explicit_size = true;
+                            w.user_positioned = true;
                         }
                     } else {
                         // --- 平铺窗口调整：召唤 BSP 树魔法 ---
@@ -1003,6 +1006,8 @@ impl AppState {
                                 Direction::Up => w.float_geo.y -= step,
                                 Direction::Down => w.float_geo.y += step,
                             }
+                            // 用户已手动摆放：不再自动居中
+                            w.user_positioned = true;
                             if let Some(wm) = &self.river_wm {
                                 // info!("-> MANAGE_DIRTY TRIGGERED BY:MoveStep");
                                 wm.manage_dirty();
@@ -1298,6 +1303,10 @@ impl AppState {
                                     &f_id, &out_name, win_tags, screen, default_w, default_h,
                                 );
                             }
+                            // 平铺窗口没有固有对话框尺寸，保留 60% 默认大小并标记为「显式尺寸」；
+                            // 位置尚未被用户摆放，允许后续按真实尺寸自动居中。
+                            self.windows[idx].has_explicit_size = true;
+                            self.windows[idx].user_positioned = false;
                         } else {
                             // --- Case B: 悬浮 -> 平铺 ---
                             info!("-> [Action] Window {:?} Switch to Tiling mode", f_id);
@@ -2300,6 +2309,15 @@ impl AppState {
         mut req_w: i32,
         mut req_h: i32,
     ) -> Geometry {
+        // 0. 保底防御：尺寸尚未确定（0 或负数，例如客户端自然尺寸尚未上报）时，
+        // 绝不能用 0 代入公式把窗口左上角钉在屏幕正中心（否则会飞到右下角出界）。
+        // 先以屏幕 50% 预估一个居中位，等真实 Dimensions 回传后再精确重算。
+        let is_undetermined = req_w <= 0 || req_h <= 0;
+        if is_undetermined {
+            req_w = (screen.w as f32 * 0.5) as i32;
+            req_h = (screen.h as f32 * 0.5) as i32;
+        }
+
         // 1. 如果请求的尺寸大于目标屏幕，则自动缩放以适应屏幕
         if req_w > screen.w {
             req_w = (screen.w as f32 * 0.6) as i32;
@@ -2339,8 +2357,10 @@ impl AppState {
         Geometry {
             x: base_x + offset,
             y: base_y + offset,
-            w: req_w,
-            h: req_h,
+            // 若原本尺寸未定，返回 0 供上层识别（真实的 w/h 在 Dimensions 事件落地）；
+            // 若尺寸已确定，则使用计算后的真实宽高。
+            w: if is_undetermined { 0 } else { req_w },
+            h: if is_undetermined { 0 } else { req_h },
         }
     }
     // --- 把 "25%" 或 "1000" 转为小数比例 (0.0~1.0) ---
@@ -2414,20 +2434,15 @@ impl AppState {
             // 2. 计算悬浮几何信息
             if let Some(out_data) = self.outputs.get(&out_name) {
                 let screen = out_data.usable_area;
-                // 如果传入了精确的大小 (如 DimensionsHint 提供的)，就用精确大小；否则用 60%
-                let w = if req_w > 0 {
-                    req_w
-                } else {
-                    (screen.w as f32 * 0.6) as i32
-                };
-                let h = if req_h > 0 {
-                    req_h
-                } else {
-                    (screen.h as f32 * 0.6) as i32
-                };
+                // 传入了精确大小（TOML 显式 width/height）才使用；否则置 0，
+                // 等待客户端在第一次 Dimensions 事件上报自然尺寸后再计算居中。
+                let w = if req_w > 0 { req_w } else { 0 };
+                let h = if req_h > 0 { req_h } else { 0 };
 
                 self.windows[idx].float_geo =
                     self.calculate_floating_geometry(win_id, &out_name, win_tags, screen, w, h);
+                // 新诞生的悬浮窗尚未被用户摆放，允许后续自动居中。
+                self.windows[idx].user_positioned = false;
             }
 
             if let Some(wm) = &self.river_wm {
@@ -2569,15 +2584,27 @@ impl AppState {
 
         if should_float {
             if !is_floating {
-                let mut sw = (ref_w as f32 * 0.6) as i32;
-                let mut sh = (ref_h as f32 * 0.6) as i32;
-                if let Some(ws) = r_w.as_deref() {
-                    sw = (Self::parse_dimension_ratio(ws, ref_w) * ref_w as f32) as i32;
-                }
-                if let Some(hs) = r_h.as_deref() {
-                    sh = (Self::parse_dimension_ratio(hs, ref_h) * ref_h as f32) as i32;
-                }
+                // 是否由 TOML 规则显式指定了尺寸。未指定时不再强加 60% 兜底，
+                // 而是提议 (0,0) 让客户端采用自然尺寸（对话框、启动器等）。
+                let has_explicit = r_w.is_some() || r_h.is_some();
+                let (sw, sh) = if has_explicit {
+                    let mut sw = (ref_w as f32 * 0.6) as i32;
+                    let mut sh = (ref_h as f32 * 0.6) as i32;
+                    if let Some(ws) = r_w.as_deref() {
+                        sw = (Self::parse_dimension_ratio(ws, ref_w) * ref_w as f32) as i32;
+                    }
+                    if let Some(hs) = r_h.as_deref() {
+                        sh = (Self::parse_dimension_ratio(hs, ref_h) * ref_h as f32) as i32;
+                    }
+                    (sw, sh)
+                } else {
+                    (0, 0)
+                };
                 self.make_window_floating(win_id, sw, sh);
+                if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+                    w.has_explicit_size = has_explicit;
+                    w.user_positioned = false;
+                }
 
                 // 自动聚焦新诞生的悬浮窗
                 self.focused_window = Some(win_id.clone());

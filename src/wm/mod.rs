@@ -178,6 +178,13 @@ pub struct WindowData {
     pub is_floating: bool,
     pub float_geo: Geometry,
     pub is_minimized: bool,
+    /// 窗口是否有用户显式指定的尺寸（TOML 配置了 width/height，或经过手动 resize）。
+    /// 若为 false，WM 会在 manage 序列提议 `(0, 0)`，把尺寸决定权交还给客户端
+    /// （微信登录框、启动器这类自备尺寸的对话框会采用其自然尺寸）。
+    pub has_explicit_size: bool,
+    /// 窗口是否已被用户手动移动/拖拽过位置。
+    /// 若为 false，窗口尺寸变动时会自动重新计算居中坐标；一旦用户拖动过就尊重其摆放。
+    pub user_positioned: bool,
     pub anim_start_geo: Option<Geometry>,
     pub anim_target_geo: Option<Geometry>,
     pub current_visual_geo: Option<Geometry>,
@@ -384,8 +391,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     last_expected_size: None,
                     layout_retry_count: 0,
                     layout_retry_pending: false,
-                    last_proposed_w: 0,
-                    last_proposed_h: 0,
+                    // -1 作为「尚未发起过首帧尺寸提议」的哨兵：确保后续 propose_dimensions(0,0)
+                    // 的 size_changed 判定 (-1 != 0) 为真，真正把首帧提议发出去。
+                    last_proposed_w: -1,
+                    last_proposed_h: -1,
                     is_floating: false,
                     float_geo: Geometry {
                         x: 0,
@@ -394,6 +403,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         h: 0,
                     },
                     is_minimized: false,
+                    has_explicit_size: false,
+                    user_positioned: false,
                     anim_start_geo: None,
                     anim_target_geo: None,
                     current_visual_geo: None,
@@ -688,8 +699,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             state.tag_anim_direction = None;
                             state.tag_anim_old_mask = 0;
                             for w in &mut state.windows {
-                                w.last_proposed_w = 0;
-                                w.last_proposed_h = 0;
+                                w.last_proposed_w = -1;
+                                w.last_proposed_h = -1;
                                 w.anim_start_geo = w.anim_target_geo;
                             }
                         }
@@ -754,8 +765,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     w.is_fullscreen_applied = true;
                                     w.fullscreen_output = w.output.clone();
                                     w.fullscreen_sync = FullscreenSyncState::Synced;
-                                    w.last_proposed_w = 0;
-                                    w.last_proposed_h = 0;
+                                    w.last_proposed_w = -1;
+                                    w.last_proposed_h = -1;
                                 }
                                 FullscreenSyncState::Synced => {
                                     // 首次进入全屏，或全屏窗口被投递到另一个显示器（out_changed）。
@@ -767,8 +778,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         w.fullscreen_output = w.output.clone();
                                         w.layout_retry_count = 0;
                                         w.layout_retry_pending = false;
-                                        w.last_proposed_w = 0;
-                                        w.last_proposed_h = 0;
+                                        w.last_proposed_w = -1;
+                                        w.last_proposed_h = -1;
                                     }
                                 }
                             }
@@ -782,8 +793,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             w.fullscreen_output = None;
                             w.layout_retry_count = 0;
                             w.layout_retry_pending = false;
-                            w.last_proposed_w = 0;
-                            w.last_proposed_h = 0;
+                            w.last_proposed_w = -1;
+                            w.last_proposed_h = -1;
                         }
                         // 无论是否曾经生效，都解除全屏纠偏状态机，避免残留状态。
                         w.fullscreen_sync = FullscreenSyncState::Synced;
@@ -1121,7 +1132,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             w_data.anim_target_geo = Some(target_geo);
                         }
 
-                        let (propose_w, propose_h) = if is_animating && !is_interactive {
+                        let (propose_w, propose_h) = if !w_data.has_explicit_size {
+                            // 用户未显式指定尺寸：提议 (0, 0)，让客户端采用自然尺寸
+                            // （微信登录框、启动器等自备尺寸的应用）。
+                            (0, 0)
+                        } else if is_animating && !is_interactive {
                             let start = w_data.anim_start_geo.unwrap_or(target_geo);
                             let current = crate::wm::animation::interpolate_geo(
                                 start,
@@ -1569,7 +1584,12 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                         // 移动：永远相对于最初按下的位置累加，绝不产生误差！
                         w.float_geo.x = initial_geo.x + dx;
                         w.float_geo.y = initial_geo.y + dy;
+                        // 用户已手动摆放：不再自动居中
+                        w.user_positioned = true;
                     } else if state.pointer_op_mode == PointerOpMode::Resize {
+                        // 用户手动调整过大小：尺寸视为显式指定，且不再自动居中
+                        w.has_explicit_size = true;
+                        w.user_positioned = true;
                         // 调整大小：使用强大的边缘拉伸数学
                         use crate::protocol::river_wm::river_window_v1::Edges;
                         let edges = Edges::from_bits_truncate(state.pointer_op_edges);
@@ -1810,6 +1830,64 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 }
 
                 if let Some(w_idx) = state.windows.iter().position(|w| w.id == proxy.id()) {
+                    // --- 2. 悬浮窗口处理 ---
+                    // 提前到此处：calculate_floating_geometry 需要 &self，
+                    // 必须避免与紧随其后的 `let w = &mut state.windows[w_idx]` 独占借用重叠。
+                    if state.windows[w_idx].is_floating && !state.windows[w_idx].is_fullscreen {
+                        let win_id = proxy.id();
+                        // 只读地收集信息（避免与后续可变借用重叠）
+                        let (win_tags, out_name, user_positioned) = {
+                            let w = &state.windows[w_idx];
+                            (w.tags, w.output.clone(), w.user_positioned)
+                        };
+
+                        if !user_positioned {
+                            // 用户尚未手动拖拽过：基于客户端上报的真实尺寸重新计算居中坐标，
+                            // 让自研启动器、对话框首帧即精准居中（不再受初始默认尺寸干扰）。
+                            if let Some(out_name) = out_name {
+                                if let Some(screen) =
+                                    state.outputs.get(&out_name).map(|o| o.usable_area)
+                                {
+                                    let new_geo = state.calculate_floating_geometry(
+                                        &win_id,
+                                        &out_name,
+                                        win_tags,
+                                        screen,
+                                        width as i32,
+                                        height as i32,
+                                    );
+                                    let w = &mut state.windows[w_idx];
+                                    w.float_geo = new_geo;
+                                    // 抑制位移动画：直接落到新坐标，避免首帧从旧位置滑入
+                                    w.anim_start_geo = None;
+                                    w.anim_target_geo = Some(new_geo);
+                                    debug!(
+                                        "-> [Float] natural-size recenter: client={}x{} -> geo=({},{},{},{})",
+                                        width, height, new_geo.x, new_geo.y, new_geo.w, new_geo.h
+                                    );
+                                    if let Some(wm) = &state.river_wm {
+                                        wm.manage_dirty();
+                                    }
+                                }
+                            }
+                        } else {
+                            // 用户已手动摆放：只同步尺寸，尊重其位置（动画期间免疫）
+                            let w = &mut state.windows[w_idx];
+                            if !is_animating {
+                                w.float_geo.w = width as i32;
+                                w.float_geo.h = height as i32;
+                            }
+                        }
+
+                        {
+                            // 悬浮窗口的尺寸由客户端自决，不存在纠错预算，直接清零
+                            let w = &mut state.windows[w_idx];
+                            w.layout_retry_count = 0;
+                            w.layout_retry_pending = false;
+                        }
+                        return;
+                    }
+
                     let w = &mut state.windows[w_idx];
 
                     // --- 1. 全屏窗口处理 ---
@@ -1892,19 +1970,6 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                                 w.fullscreen_sync = FullscreenSyncState::Synced;
                             }
                         }
-                        return;
-                    }
-
-                    // --- 2. 悬浮窗口处理 ---
-                    if w.is_floating {
-                        // --- 【悬浮窗纯净逻辑 + 动画免疫】 ---
-                        // 如果正在播放动画，绝对不能用客户端返回的中间过渡尺寸覆盖我们的目标 float_geo
-                        if !is_animating {
-                            w.float_geo.w = width as i32;
-                            w.float_geo.h = height as i32;
-                        }
-                        w.layout_retry_count = 0;
-                        w.layout_retry_pending = false;
                         return;
                     }
 
