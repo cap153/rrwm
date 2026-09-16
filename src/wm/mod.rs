@@ -685,14 +685,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     state.anim_start_time = Some(std::time::Instant::now());
                 }
 
-                let mut anim_progress = 1.0;
                 let mut is_animating = false;
 
                 if anim_enabled {
                     if let Some(start_time) = state.anim_start_time {
                         let elapsed = start_time.elapsed().as_millis() as u64;
                         if elapsed < anim_duration {
-                            anim_progress = elapsed as f32 / anim_duration as f32;
                             is_animating = true;
                         } else {
                             state.anim_start_time = None;
@@ -1032,8 +1030,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         w_data.anim_target_geo = Some(actual_target_geo);
                                         if anim_enabled {
                                             state.anim_start_time = Some(std::time::Instant::now());
-                                            is_animating = true;
-                                            anim_progress = 0.0;
                                             if let Some(wm) = &state.river_wm {
                                                 // info!("-> MANAGE_DIRTY TRIGGERED BY:WmEvent::ManageStart.geo_changed.anim_enabled.平铺");
                                                 wm.manage_dirty();
@@ -1041,18 +1037,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         }
                                     }
 
-                                    let (propose_w, propose_h) = if is_animating {
-                                        let start =
-                                            w_data.anim_start_geo.unwrap_or(actual_target_geo);
-                                        let current = crate::wm::animation::interpolate_geo(
-                                            start,
-                                            actual_target_geo,
-                                            anim_progress,
-                                        );
-                                        (current.w, current.h)
-                                    } else {
-                                        (actual_target_geo.w, actual_target_geo.h)
-                                    };
+                                    // 直接提议【最终目标尺寸】，绝不使用动画插值尺寸。
+                                    // 动画只允许在 RenderStart 的 set_position / set_clip_box
+                                    // 视觉层完成；否则客户端会在每一帧重排（Neovide/终端 文字跳变）。
+                                    let propose_w = actual_target_geo.w;
+                                    let propose_h = actual_target_geo.h;
 
                                     state.last_geometry.insert(
                                         window.id(),
@@ -1121,8 +1110,6 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     .or(Some(target_geo));
                                 if anim_enabled {
                                     state.anim_start_time = Some(std::time::Instant::now());
-                                    is_animating = true;
-                                    anim_progress = 0.0;
                                     if let Some(wm) = &state.river_wm {
                                         // info!("-> MANAGE_DIRTY TRIGGERED BY:WmEvent::ManageStart.geo_changed.anim_enabled.悬浮");
                                         wm.manage_dirty();
@@ -1132,20 +1119,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                             w_data.anim_target_geo = Some(target_geo);
                         }
 
-                        let (propose_w, propose_h) = if !w_data.has_explicit_size {
-                            // 用户未显式指定尺寸：提议 (0, 0)，让客户端采用自然尺寸
-                            // （微信登录框、启动器等自备尺寸的应用）。
-                            (0, 0)
-                        } else if is_animating && !is_interactive {
-                            let start = w_data.anim_start_geo.unwrap_or(target_geo);
-                            let current = crate::wm::animation::interpolate_geo(
-                                start,
-                                target_geo,
-                                anim_progress,
-                            );
-                            (current.w, current.h)
-                        } else {
+                        // 显式指定尺寸 → 直接提议【最终目标尺寸】；
+                        // 自决尺寸 → 提议 (0, 0)，让客户端采用自然尺寸（微信登录框、启动器等）。
+                        // 两种情况都绝不使用动画插值尺寸，动画仅在 RenderStart 的视觉层完成。
+                        let (propose_w, propose_h) = if w_data.has_explicit_size {
                             (target_geo.w, target_geo.h)
+                        } else {
+                            (0, 0)
                         };
 
                         // 同样：全屏窗口（含首帧未生效阶段）由 fullscreen() 决定尺寸，
@@ -1167,10 +1147,16 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
 
                         let is_focused = state.focused_window.as_ref() == Some(&w_data.id);
+                        // 自决尺寸的悬浮窗在真实 Dimensions 回传前 float_geo 仍为 0：
+                        // 此时不绘制边框，避免暴露 50% 的临时占位大框（微信等对话框），
+                        // 待真实尺寸就绪、中心点精确重算后再一次性呈现完整边框。
+                        let is_ready = w_data.has_explicit_size
+                            || (w_data.float_geo.w > 0 && w_data.float_geo.h > 0);
+                        let current_border = if is_ready { border_val as i32 } else { 0 };
                         if is_focused {
                             w_data.window.set_borders(
                                 crate::protocol::river_wm::river_window_v1::Edges::all(),
-                                border_val as i32,
+                                current_border,
                                 br,
                                 bg,
                                 bb,
@@ -1179,7 +1165,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         } else {
                             w_data.window.set_borders(
                                 crate::protocol::river_wm::river_window_v1::Edges::all(),
-                                border_val as i32,
+                                current_border,
                                 49,
                                 50,
                                 68,

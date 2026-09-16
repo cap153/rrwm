@@ -2575,15 +2575,23 @@ impl AppState {
         }
 
         // 5. 执行物理操作
+        // 只有当窗口的 is_floating / is_fullscreen / 自定义比例确实发生变化时，
+        // 才触发 manage_dirty，避免窗口创建初期因连续收到 Title/AppId 事件而
+        // 反复重置 manage 序列（这会打断开窗动画、放大尺寸跳变）。
+        let mut changed = false;
         if should_fs {
             self.clear_other_fullscreen(win_id, &Some(out_id.clone()), tags);
         }
         if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
-            w.is_fullscreen = should_fs;
+            if w.is_fullscreen != should_fs {
+                w.is_fullscreen = should_fs;
+                changed = true;
+            }
         }
 
         if should_float {
             if !is_floating {
+                changed = true;
                 // 是否由 TOML 规则显式指定了尺寸。未指定时不再强加 60% 兜底，
                 // 而是提议 (0,0) 让客户端采用自然尺寸（对话框、启动器等）。
                 let has_explicit = r_w.is_some() || r_h.is_some();
@@ -2618,6 +2626,7 @@ impl AppState {
                 if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
                     w.is_floating = false;
                 }
+                changed = true;
             }
 
             let mut already_tiled = false;
@@ -2639,6 +2648,7 @@ impl AppState {
             }
 
             if !already_tiled {
+                changed = true;
                 let w_data = self
                     .windows
                     .iter()
@@ -2675,6 +2685,7 @@ impl AppState {
                 self.tag_focus_history
                     .insert((out_id, tags), win_id.clone());
             } else if let Some(ratio) = custom_ratio {
+                changed = true;
                 // 如果已经入树了，后来匹配到更具体的规则，追发比例更新！
                 if let Some(mut root) = self.layout_roots.remove(&tree_key) {
                     root.update_ratio_for_new_window(win_id, ratio);
@@ -2686,9 +2697,11 @@ impl AppState {
                 }
             }
         }
-        if let Some(wm) = &self.river_wm {
-            info!("-> MANAGE_DIRTY TRIGGERED BY:apply_window_rules");
-            wm.manage_dirty();
+        if changed {
+            if let Some(wm) = &self.river_wm {
+                info!("-> MANAGE_DIRTY TRIGGERED BY:apply_window_rules");
+                wm.manage_dirty();
+            }
         }
     }
 }
