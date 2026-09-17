@@ -126,14 +126,14 @@ smart_borders = "true" # Borders/gaps disappear when only one window is present
 gaps = "2" # Window gaps
 
 [window.active] # Set border for the focused window; width should not exceed the gaps defined in [window]
-border = { width = "2", color = "#bd93f9", resize_color = "#ff5555" }
+border = { width = "2", color = "#bd93f9", resize_color = "#ff5555" } # Default enabled=true, width=0 (only gaps rendered, no border drawn)
 
 [window.rule] # You can use 'rrwm --appid' List all active windows with their appid and title
 match = [
 	{ appid="chromium", icon="", width="27%" }, # Split tiled window width/height by ratio, units in % or px
 	{ appid="scrcpy", icon="", width="34.31%", height="100%", floating="true" },
 	{ appid="zen-browser", icon="" },
-	{ appid="zen-browser", title="Peek*", icon="", width="27%" }, # Allow regular matching via title
+	{ title="Peek*", icon="", width="27%" }, # Allow regular matching via title
 	{ appid="kitty", icon="󰆍" },
 	{ appid="neovide", icon="" },
 	{ appid="wechat", icon="" },
@@ -143,9 +143,18 @@ match = [
 	{ appid="com.mitchellh.ghostty", icon="" },
 	{ appid="org.wezfurlong.wezterm", icon="" },
 	{ appid="com.gabm.satty", icon="", fullscreen="true" },
-	{ appid="kiro", icon="" }
-]
+	{ appid="kiro", icon="" },
 
+	# Window-level border (border) rules
+	{ appid="stools", icon="", border="false" }, # shorthand for { enabled="false" }
+	{ appid="kitty", border={ width="1" } }, # override only width; other fields inherit [window.active].border
+	{ appid="GUI.for.SingBox", border={ # full override
+		enabled="true",
+		width="2",
+		color="#bd93f9",
+		resize_color="#ff5555"
+	}},
+]
 
 # You can use 'wev' to query the XKB names for specific keys
 [keybindings.alt]

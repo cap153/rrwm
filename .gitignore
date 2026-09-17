@@ -1,4 +1,4 @@
 /target
 /record.md
 /plan
-a.diff
+*.diff

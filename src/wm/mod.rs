@@ -191,6 +191,9 @@ pub struct WindowData {
     pub is_fixed_size: bool,
     pub has_parent: bool,
     pub matched_rule_score: u32,
+    /// 该窗口匹配到的 per-window border 规则覆盖（来自 [window.rule]）。
+    /// None 表示无覆盖，回退到全局 [window.active].border。
+    pub border_rule: Option<crate::config::WindowBorderRule>,
     pub created_at: std::time::Instant,
 }
 
@@ -348,6 +351,31 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
     }
 }
 
+/// 解析单个窗口最终生效的边框参数。
+///
+/// 合并「全局 `[window.active].border`」与「该窗口匹配到的 rule border 覆盖」，
+/// 并根据 `is_resize_mode` 选择普通色或 resize 色。最终宽度按 `gaps` 截断
+/// （不修改全局 gaps）。截断告警在 rule 应用阶段（`apply_window_rules`）一次性输出，
+/// 渲染循环只做 `min(gaps)` 截断，避免高频日志刷屏。
+///
+/// 返回 `(生效宽度, br, bg, bb, ba)`，`ba` 为预乘 alpha 后的颜色分量。
+fn resolve_effective_border(
+    config: &crate::config::Config,
+    border_rule: Option<&crate::config::WindowBorderRule>,
+    is_resize_mode: bool,
+    gaps: u32,
+) -> (u32, u32, u32, u32, u32) {
+    let rb = config.resolve_window_border(border_rule);
+    let eff_width = if rb.enabled { rb.width.min(gaps) } else { 0 };
+    let color = if is_resize_mode {
+        &rb.resize_color
+    } else {
+        &rb.color
+    };
+    let (br, bg, bb, ba) = AppState::parse_color(color);
+    (eff_width, br, bg, bb, ba)
+}
+
 // --- 2. 核心：监听 RiverWindowManagerV1 (管理循环) ---
 impl Dispatch<RiverWindowManagerV1, ()> for AppState {
     fn event(
@@ -411,6 +439,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     is_fixed_size: false,
                     has_parent: false,
                     matched_rule_score: 0,
+                    border_rule: None,
                     created_at: std::time::Instant::now(),
                 });
             }
@@ -869,30 +898,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
 
                 // --- 【统一解析配置，供平铺和悬浮共享】 ---
                 let win_cfg = state.config.window.as_ref();
-                let border_cfg = win_cfg
-                    .and_then(|c| c.active.as_ref())
-                    .and_then(|a| a.border.as_ref());
-                let border_val = border_cfg
-                    .and_then(|b| b.width.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let mut gaps_val = win_cfg
+                let gaps_val = win_cfg
                     .and_then(|c| c.gaps.as_ref())
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(0);
-                if gaps_val < border_val {
-                    gaps_val = border_val;
-                }
-
-                let normal_color_str = border_cfg.map(|b| b.color.as_str()).unwrap_or("#ffffff");
-                let resize_color_str = border_cfg
-                    .and_then(|b| b.resize_color.as_deref())
-                    .unwrap_or("#ff0000");
-                let target_color_str = if state.is_resize_mode {
-                    resize_color_str
-                } else {
-                    normal_color_str
-                };
-                let (br, bg, bb, ba) = Self::parse_color(target_color_str);
 
                 let is_smart = win_cfg
                     .map(|c| c.smart_borders.to_lowercase() == "true")
@@ -953,9 +962,19 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                             )
                                         };
 
-                                    // 设置边框
+                                    // 设置边框（含窗口级 rule 覆盖）
+                                    let border_rule = w_data.border_rule.clone();
+                                    let (border_val, br, bg, bb, ba) = resolve_effective_border(
+                                        &state.config,
+                                        border_rule.as_ref(),
+                                        state.is_resize_mode,
+                                        gaps_val,
+                                    );
                                     let current_border =
-                                        if is_focused && !(is_smart && window_count <= 1) {
+                                        if border_val > 0
+                                            && is_focused
+                                            && !(is_smart && window_count <= 1)
+                                        {
                                             border_val as i32
                                         } else {
                                             0
@@ -1152,7 +1171,18 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         // 待真实尺寸就绪、中心点精确重算后再一次性呈现完整边框。
                         let is_ready = w_data.has_explicit_size
                             || (w_data.float_geo.w > 0 && w_data.float_geo.h > 0);
-                        let current_border = if is_ready { border_val as i32 } else { 0 };
+                        let border_rule = w_data.border_rule.clone();
+                        let (border_val, br, bg, bb, ba) = resolve_effective_border(
+                            &state.config,
+                            border_rule.as_ref(),
+                            state.is_resize_mode,
+                            gaps_val,
+                        );
+                        let current_border = if is_ready && border_val > 0 {
+                            border_val as i32
+                        } else {
+                            0
+                        };
                         if is_focused {
                             w_data.window.set_borders(
                                 crate::protocol::river_wm::river_window_v1::Edges::all(),
@@ -1238,19 +1268,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                     }
                 }
 
-                let border_cfg = win_cfg
-                    .and_then(|c| c.active.as_ref())
-                    .and_then(|a| a.border.as_ref());
-                let border_val = border_cfg
-                    .and_then(|b| b.width.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let mut gaps_val = win_cfg
+                let gaps_val = win_cfg
                     .and_then(|c| c.gaps.as_ref())
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(0);
-                if gaps_val < border_val {
-                    gaps_val = border_val;
-                }
                 let is_smart = win_cfg
                     .map(|c| c.smart_borders.to_lowercase() == "true")
                     .unwrap_or(false);
@@ -1352,11 +1373,23 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                         node.set_position(current_geo.x, current_geo.y);
 
                                         if is_animating {
+                                            // 按窗口级 rule 解析本窗口边框宽度（仅截取动画用）
+                                            let eff_border_width = {
+                                                let border_rule = w_data.border_rule.clone();
+                                                let rb = state
+                                                    .config
+                                                    .resolve_window_border(border_rule.as_ref());
+                                                if rb.enabled {
+                                                    rb.width.min(gaps_val)
+                                                } else {
+                                                    0
+                                                }
+                                            } as i32;
                                             let (cx, cy, cw, ch) =
                                                 crate::wm::animation::calculate_clip_box(
                                                     current_geo,
                                                     out_data.usable_area,
-                                                    border_val as i32,
+                                                    eff_border_width,
                                                 );
                                             w_data.window.set_clip_box(cx, cy, cw, ch);
                                         } else {

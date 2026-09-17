@@ -2483,6 +2483,7 @@ impl AppState {
         // 2. 规则匹配 (得分制优先级机制)
         let mut best_score = 0;
         let (mut r_float, mut r_fs, mut r_w, mut r_h) = (None, None, None, None);
+        let mut r_border: Option<crate::config::WindowBorderRule> = None;
 
         if let Some(rules) = self
             .config
@@ -2523,6 +2524,7 @@ impl AppState {
                         r_fs = rule.fullscreen.clone();
                         r_w = rule.width.clone();
                         r_h = rule.height.clone();
+                        r_border = rule.border.clone();
                     }
                 }
             }
@@ -2579,6 +2581,34 @@ impl AppState {
         // 才触发 manage_dirty，避免窗口创建初期因连续收到 Title/AppId 事件而
         // 反复重置 manage 序列（这会打断开窗动画、放大尺寸跳变）。
         let mut changed = false;
+
+        // 记录该窗口匹配到的 border rule（无匹配则为 None，回退全局 [window.active].border）。
+        // 仅当覆盖项发生变化时标记 changed，触发一次 manage 序列重绘边框。
+        if let Some(w) = self.windows.iter_mut().find(|w| &w.id == win_id) {
+            if w.border_rule != r_border {
+                w.border_rule = r_border.clone();
+                changed = true;
+                // 在 rule 应用阶段一次性告警：最终生效边框宽度超过 gaps 时会被截断，
+                // 不在渲染循环里反复 warn，避免日志刷屏。
+                let gaps_val = self
+                    .config
+                    .window
+                    .as_ref()
+                    .and_then(|c| c.gaps.as_ref())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let rb = self.config.resolve_window_border(r_border.as_ref());
+                if rb.enabled && rb.width > gaps_val {
+                    warn!(
+                        "window border width {} exceeds gaps {}, clamped to {}",
+                        rb.width,
+                        gaps_val,
+                        rb.width.min(gaps_val)
+                    );
+                }
+            }
+        }
+
         if should_fs {
             self.clear_other_fullscreen(win_id, &Some(out_id.clone()), tags);
         }
