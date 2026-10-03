@@ -25,6 +25,16 @@ https://github.com/user-attachments/assets/c711d157-920f-4586-ba03-90476dc7ac16
 paru -S rrwm-bin
 ```
 
+## Gentoo Linux
+
+Available in the [acooliodude-overlay](https://codeberg.org/ACoolioDude/acooliodude-overlay) (thanks to [@ACoolioDude](https://codeberg.org/ACoolioDude)):
+
+```bash
+sudo eselect repository add acooliodude-overlay git https://codeberg.org/ACoolioDude/acooliodude-overlay.git
+sudo emaint sync -r acooliodude-overlay
+sudo emerge --ask gui-wm/rrwm
+```
+
 ## Build from Source
 
 ### Local build (glibc)

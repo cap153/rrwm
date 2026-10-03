@@ -15,6 +15,16 @@
 paru -S rrwm-bin
 ```
 
+## Gentoo Linux
+
+可通过 [acooliodude-overlay](https://codeberg.org/ACoolioDude/acooliodude-overlay) 安装（感谢 [@ACoolioDude](https://codeberg.org/ACoolioDude) 的打包与支持）：
+
+```bash
+sudo eselect repository add acooliodude-overlay git https://codeberg.org/ACoolioDude/acooliodude-overlay.git
+sudo emaint sync -r acooliodude-overlay
+sudo emerge --ask gui-wm/rrwm
+```
+
 ## 编译安装
 
 ### 本地编译 (glibc)
