@@ -4,7 +4,7 @@
 
 * [river](https://codeberg.org/river/river) 0.4.0
 * wev (可选，查询特定的按键对应的XKB名称)
-* libinput-tools (可选：使用 `libinput events` 查询鼠标按键的标准名称。)
+* libinput-tools (可选：使用 `libinput debug-events` 查询鼠标按键的标准名称。)
 * wlr-randr (可选，用于获取显示器的硬件信息)
 
 # 安装
@@ -278,7 +278,7 @@ i = { action = "move", args = ["right"], unit = "5" }
 u = { action = "move", args = ["up"], unit = "5" }
 e = { action = "move", args = ["down"], unit = "5" }
 
-[pointer.alt] # 可以使用 libinput events 查询鼠标按键的标准名称
+[pointer.alt] # 可以使用 libinput debug-events 查询鼠标按键的标准名称
 BTN_LEFT = { action = "move_interactive" } # 在窗口任意位置 alt+鼠标左键 按住拖拽移动
 BTN_RIGHT = { action = "resize_interactive" } # 在窗口任意位置 alt+鼠标右键 按住拖拽调整窗口大小
 ```

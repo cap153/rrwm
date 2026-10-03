@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/c711d157-920f-4586-ba03-90476dc7ac16
 
 * [river](https://codeberg.org/river/river) 0.4.0
 * `wev` (Optional: used to query XKB names for specific keys)
-* `libinput-tools` (Optional: used `libinput events` to query standard Names for Mouse Buttons)
+* `libinput-tools` (Optional: used `libinput debug-events` to query standard Names for Mouse Buttons)
 * `wlr-randr` (Optional: used to retrieve hardware information for monitors)
 
 # Installation
@@ -288,7 +288,7 @@ i = { action = "move", args = ["right"], unit = "5" }
 u = { action = "move", args = ["up"], unit = "5" }
 e = { action = "move", args = ["down"], unit = "5" }
 
-[pointer.alt] # You can use 'libinput events' to query standard names for mouse buttons
+[pointer.alt] # You can use 'libinput debug-events' to query standard names for mouse buttons
 BTN_LEFT = { action = "move_interactive" } # Move by holding Alt + Left Click anywhere on the window
 BTN_RIGHT = { action = "resize_interactive" } # Resize by holding Alt + Right Click anywhere on the window
 ```
