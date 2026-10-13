@@ -82,6 +82,33 @@ impl LayoutNode {
         }
     }
 
+    /// 判断 BSP 树中是否存在指定窗口的叶节点。
+    pub fn contains(&self, target_id: &ObjectId) -> bool {
+        match self {
+            LayoutNode::Window(w_data) => &w_data.id == target_id,
+            LayoutNode::Container {
+                left_child,
+                right_child,
+                ..
+            } => left_child.contains(target_id) || right_child.contains(target_id),
+        }
+    }
+
+    /// 按「从左到右、从上到下」的顺序收集树中所有叶节点窗口 ID。
+    pub fn collect_leaves(&self, out: &mut Vec<ObjectId>) {
+        match self {
+            LayoutNode::Window(w_data) => out.push(w_data.id.clone()),
+            LayoutNode::Container {
+                left_child,
+                right_child,
+                ..
+            } => {
+                left_child.collect_leaves(out);
+                right_child.collect_leaves(out);
+            }
+        }
+    }
+
     pub fn remove_at(node: LayoutNode, target_id: &ObjectId) -> Option<LayoutNode> {
         match node {
             LayoutNode::Window(w_data) => {

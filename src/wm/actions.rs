@@ -327,6 +327,8 @@ impl AppState {
             let (next_out_name, next_out_data) = sorted[next_idx];
             let next_out_name = next_out_name.clone();
             let target_monitor_tags = next_out_data.tags;
+            // 提前取出，让 sorted 对 self.outputs 的借用到此结束
+            let next_out_area = next_out_data.usable_area;
 
             // --- 【全屏踢馆逻辑】 ---
             // 跨屏幕移动时，如果目标屏幕当前正在显示的 Tag 有全屏窗口，将其降级
@@ -376,7 +378,7 @@ impl AppState {
                         win_id,
                         &next_out_name,
                         target_monitor_tags,
-                        next_out_data.usable_area,
+                        next_out_area,
                         w.float_geo.w,
                         w.float_geo.h,
                     ));
@@ -437,7 +439,7 @@ impl AppState {
                 self.focused_output = Some(next_out_name);
                 self.focused_tags = target_monitor_tags;
                 self.focused_window = Some(win_id.clone());
-                self.tag_focus_history.insert(new_key, win_id.clone());
+                self.record_tag_focus_at(win_id, new_key);
 
                 if let Some(wm) = &self.river_wm {
                     // info!("-> MANAGE_DIRTY TRIGGERED BY:move_window_to_output");
@@ -445,8 +447,8 @@ impl AppState {
                 }
 
                 // 窗口移动后，鼠标跟随到新屏幕中心
-                let cx = next_out_data.usable_area.x + (next_out_data.usable_area.w / 2);
-                let cy = next_out_data.usable_area.y + (next_out_data.usable_area.h / 2);
+                let cx = next_out_area.x + (next_out_area.w / 2);
+                let cy = next_out_area.y + (next_out_area.h / 2);
                 self.pending_pointer_warp = Some((cx, cy));
             }
         }
@@ -1139,42 +1141,65 @@ impl AppState {
                                 self.layout_roots
                                     .insert(tree_key.clone(), LayoutNode::Window(w_data.clone()));
                             } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
-                                // 找当前焦点窗口作为切分目标
+                                // 找当前焦点窗口作为切分目标（解析为有效的平铺叶节点）。
+                                // 回退必须落在树里真实的平铺叶节点上，绝不能退回
+                                // focused_window（可能是悬浮窗）。
                                 let insert_target = self
-                                    .focused_window
-                                    .clone()
-                                    .unwrap_or_else(|| target_win_id.clone());
+                                    .resolve_tiling_target(&root, &tree_key, &target_win_id)
+                                    .or_else(|| {
+                                        self.fallback_tiling_target(&root, &tree_key, &target_win_id)
+                                    });
 
-                                let split =
-                                    if let Some(geo) = self.last_geometry.get(&insert_target) {
-                                        if geo.w > geo.h {
-                                            SplitType::Vertical
+                                match insert_target {
+                                    Some(insert_target) => {
+                                        let split = if let Some(geo) =
+                                            self.last_geometry.get(&insert_target)
+                                        {
+                                            if geo.w > geo.h {
+                                                SplitType::Vertical
+                                            } else {
+                                                SplitType::Horizontal
+                                            }
                                         } else {
-                                            SplitType::Horizontal
-                                        }
-                                    } else {
-                                        SplitType::Vertical
-                                    };
+                                            SplitType::Vertical
+                                        };
 
-                                // 插入失败则强制合并到根节点
-                                if !root.insert_at(&insert_target, w_data.clone(), split, None) {
-                                    let new_root = LayoutNode::Container {
-                                        split_type: SplitType::Vertical,
-                                        ratio: 0.5,
-                                        left_child: Box::new(root),
-                                        right_child: Box::new(LayoutNode::Window(w_data.clone())),
-                                    };
-                                    self.layout_roots.insert(tree_key.clone(), new_root);
-                                } else {
-                                    self.layout_roots.insert(tree_key.clone(), root);
+                                        // 插入失败则强制合并到根节点
+                                        if !root.insert_at(
+                                            &insert_target,
+                                            w_data.clone(),
+                                            split,
+                                            None,
+                                        ) {
+                                            let new_root = LayoutNode::Container {
+                                                split_type: SplitType::Vertical,
+                                                ratio: 0.5,
+                                                left_child: Box::new(root),
+                                                right_child: Box::new(LayoutNode::Window(
+                                                    w_data.clone(),
+                                                )),
+                                            };
+                                            self.layout_roots.insert(tree_key.clone(), new_root);
+                                        } else {
+                                            self.layout_roots.insert(tree_key.clone(), root);
+                                        }
+                                    }
+                                    // 树中没有任何有效的旧平铺窗口：新窗口直接作为树根，
+                                    // 绝不把悬浮窗/不在树中的窗口当插入目标而触发整树合并。
+                                    None => {
+                                        self.layout_roots
+                                            .insert(tree_key.clone(), LayoutNode::Window(w_data.clone()));
+                                    }
                                 }
                             }
                         }
 
                         // 夺取焦点，君临天下
                         self.focused_window = Some(target_win_id.clone());
-                        self.tag_focus_history
-                            .insert((cur_out, cur_tags), target_win_id.clone());
+                        self.record_tag_focus_at(
+                            &target_win_id,
+                            (cur_out.clone(), cur_tags),
+                        );
 
                         if let Some(seat) = &self.main_seat {
                             seat.focus_window(&w_data.window);
@@ -1249,7 +1274,7 @@ impl AppState {
                                     .map(|w| w.id.clone());
 
                                 if let Some(rid) = replacement {
-                                    self.tag_focus_history.insert(tree_key, rid);
+                                    self.record_tag_focus(&rid);
                                 }
                             }
                         }
@@ -1318,30 +1343,40 @@ impl AppState {
                                 self.layout_roots
                                     .insert(tree_key, LayoutNode::Window(w_data));
                             } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
-                                // 尝试插入到某个“参考窗口”旁边（比如最后活跃的平铺窗口
+                                // 尝试插入到某个“参考窗口”旁边（优先最后活跃的平铺窗口，
+                                // 历史失效时回退到树中的有效平铺叶节点；
+                                // 不能回退到 f_id 自己，它此刻还不在树里）
                                 let target_id = self
-                                    .tag_focus_history
-                                    .get(&tree_key)
-                                    .cloned()
-                                    .unwrap_or(f_id.clone());
+                                    .resolve_tiling_target(&root, &tree_key, &f_id)
+                                    .or_else(|| self.fallback_tiling_target(&root, &tree_key, &f_id));
 
-                                // 如果 insert_at 返回 false（没找到 target），我们就把 root 和新窗口组成一个新的 Container
-                                if !root.insert_at(
-                                    &target_id,
-                                    w_data.clone(),
-                                    SplitType::Vertical,
-                                    None,
-                                ) {
-                                    // 没找到插入点，强行合并
-                                    let new_root = LayoutNode::Container {
-                                        split_type: SplitType::Vertical,
-                                        ratio: 0.5,
-                                        left_child: Box::new(root),
-                                        right_child: Box::new(LayoutNode::Window(w_data)),
-                                    };
-                                    self.layout_roots.insert(tree_key, new_root);
-                                } else {
-                                    self.layout_roots.insert(tree_key, root);
+                                match target_id {
+                                    Some(target_id) => {
+                                        // 如果 insert_at 返回 false（没找到 target），我们就把 root 和新窗口组成一个新的 Container
+                                        if !root.insert_at(
+                                            &target_id,
+                                            w_data.clone(),
+                                            SplitType::Vertical,
+                                            None,
+                                        ) {
+                                            // 没找到插入点，强行合并
+                                            let new_root = LayoutNode::Container {
+                                                split_type: SplitType::Vertical,
+                                                ratio: 0.5,
+                                                left_child: Box::new(root),
+                                                right_child: Box::new(LayoutNode::Window(w_data)),
+                                            };
+                                            self.layout_roots.insert(tree_key, new_root);
+                                        } else {
+                                            self.layout_roots.insert(tree_key, root);
+                                        }
+                                    }
+                                    // 树中没有任何有效的旧平铺窗口：新窗口直接作为树根，
+                                    // 不把不在树中的窗口当插入目标而触发整树合并。
+                                    None => {
+                                        self.layout_roots
+                                            .insert(tree_key, LayoutNode::Window(w_data));
+                                    }
                                 }
                             }
                         }
@@ -1564,8 +1599,8 @@ impl AppState {
                                 .find(|w| w.id == new_focus)
                                 .and_then(|w| w.output.clone())
                             {
-                                self.tag_focus_history
-                                    .insert((out_id, self.focused_tags), new_focus);
+                                let key = (out_id, self.focused_tags);
+                                self.record_tag_focus_at(&new_focus, key);
                             }
                             moved_locally = true;
                         }
@@ -1885,7 +1920,7 @@ impl AppState {
                 })
                 .map(|w| w.id.clone());
             if let Some(rid) = replacement {
-                self.tag_focus_history.insert(old_key.clone(), rid);
+                self.record_tag_focus(&rid);
             } else {
                 self.tag_focus_history.remove(&old_key);
             }
@@ -1968,7 +2003,7 @@ impl AppState {
         }
 
         // 状态同步
-        self.tag_focus_history.insert(new_key, win_id.clone());
+        self.record_tag_focus_at(win_id, new_key);
 
         if follow {
             if let Some(out_data) = self.outputs.get_mut(&out_id) {
@@ -2085,7 +2120,7 @@ impl AppState {
             }
             // 交换后，焦点依然跟着原来的窗口
             self.focused_window = Some(win_id.clone());
-            self.tag_focus_history.insert(tree_key, win_id.clone());
+            self.record_tag_focus_at(win_id, tree_key);
         } else {
             // 2. 边界判定：如果水平方向没邻居了，执行跨标签流转（bspwm 风格）
             match dir {
@@ -2223,7 +2258,7 @@ impl AppState {
                 if let Some(win_id) = edge_win {
                     info!("-> [Focus] Auto-lock tiling edge: {:?}", win_id);
                     self.focused_window = Some(win_id.clone());
-                    self.tag_focus_history.insert(tree_key, win_id);
+                    self.record_tag_focus_at(&win_id, tree_key);
                 } else {
                     self.focused_window = None;
                 }
@@ -2546,13 +2581,16 @@ impl AppState {
         let mut custom_ratio = None;
         let mut split = crate::wm::layout::SplitType::Vertical;
 
+        // 解析有效的平铺插入目标：优先同一 (显示器, Tag) 下最近聚焦的平铺窗口，
+        // 历史失效时（悬浮/已关闭/不在树中）回退到树中的有效叶节点。
+        // 悬浮窗绝不作为平铺插入点，避免污染 BSP 平铺布局。
         let target_id = self
-            .tag_focus_history
+            .layout_roots
             .get(&tree_key)
-            .filter(|&id| *id != *win_id)
-            .cloned();
+            .and_then(|root| self.resolve_tiling_target(root, &tree_key, win_id));
         let (ref_w, ref_h) = target_id
-            .and_then(|tid| self.last_geometry.get(&tid).map(|g| (g.w, g.h)))
+            .as_ref()
+            .and_then(|tid| self.last_geometry.get(tid).map(|g| (g.w, g.h)))
             .unwrap_or_else(|| {
                 self.outputs
                     .get(&out_id)
@@ -2647,8 +2685,7 @@ impl AppState {
                 // 自动聚焦新诞生的悬浮窗
                 self.focused_window = Some(win_id.clone());
                 self.focused_output = Some(out_id.clone());
-                self.tag_focus_history
-                    .insert((out_id.clone(), tags), win_id.clone());
+                self.record_tag_focus_at(win_id, (out_id.clone(), tags));
             }
         } else {
             // 平铺模式
@@ -2691,29 +2728,40 @@ impl AppState {
                         crate::wm::layout::LayoutNode::Window(w_data),
                     );
                 } else if let Some(mut root) = self.layout_roots.remove(&tree_key) {
-                    let tid = self
-                        .tag_focus_history
-                        .get(&tree_key)
-                        .cloned()
-                        .unwrap_or_else(|| win_id.clone());
-                    if !root.insert_at(&tid, w_data.clone(), split, custom_ratio) {
-                        let new_root = crate::wm::layout::LayoutNode::Container {
-                            split_type: crate::wm::layout::SplitType::Vertical,
-                            ratio: custom_ratio.unwrap_or(0.5),
-                            left_child: Box::new(root),
-                            right_child: Box::new(crate::wm::layout::LayoutNode::Window(w_data)),
-                        };
-                        self.layout_roots.insert(tree_key.clone(), new_root);
-                    } else {
-                        self.layout_roots.insert(tree_key.clone(), root);
+                    // 复用前面解析出的有效平铺插入目标；理论上有树即有目标，仍做一次兜底，
+                    // 且兜底目标同样必须是树里真实的平铺叶节点。
+                    let tid = target_id
+                        .clone()
+                        .or_else(|| self.fallback_tiling_target(&root, &tree_key, win_id));
+                    match tid {
+                        Some(tid) => {
+                            if !root.insert_at(&tid, w_data.clone(), split, custom_ratio) {
+                                let new_root = crate::wm::layout::LayoutNode::Container {
+                                    split_type: crate::wm::layout::SplitType::Vertical,
+                                    ratio: custom_ratio.unwrap_or(0.5),
+                                    left_child: Box::new(root),
+                                    right_child: Box::new(crate::wm::layout::LayoutNode::Window(
+                                        w_data,
+                                    )),
+                                };
+                                self.layout_roots.insert(tree_key.clone(), new_root);
+                            } else {
+                                self.layout_roots.insert(tree_key.clone(), root);
+                            }
+                        }
+                        // 树中没有任何有效的旧平铺窗口：新窗口直接作为树根，
+                        // 不把不在树中的窗口当插入目标而触发整树合并。
+                        None => {
+                            self.layout_roots
+                                .insert(tree_key.clone(), crate::wm::layout::LayoutNode::Window(w_data));
+                        }
                     }
                 }
 
                 // 平铺窗强行夺取焦点
                 self.focused_window = Some(win_id.clone());
                 self.focused_output = Some(out_id.clone());
-                self.tag_focus_history
-                    .insert((out_id, tags), win_id.clone());
+                self.record_tag_focus_at(win_id, (out_id.clone(), tags));
             } else if let Some(ratio) = custom_ratio {
                 changed = true;
                 // 如果已经入树了，后来匹配到更具体的规则，追发比例更新！
@@ -2733,5 +2781,160 @@ impl AppState {
                 wm.manage_dirty();
             }
         }
+    }
+
+    /// 记录某个 (显示器, Tag) 下最近的聚焦窗口，并单独维护「最近聚焦的平铺窗口」记忆。
+    ///
+    /// 关键点：当悬浮窗口夺走焦点时，先把历史里原有的有效平铺窗口抢救进
+    /// `tag_tiled_focus_history`，这样悬浮启动器关闭后仍能回到那个平铺窗口，
+    /// 而不是退化成 BSP 树左上角的窗口。
+    pub fn record_tag_focus_at(&mut self, win_id: &ObjectId, key: (String, u32)) {
+        let meta = self
+            .windows
+            .iter()
+            .find(|w| &w.id == win_id)
+            .map(|w| (w.is_floating, w.is_minimized));
+
+        // 1. 抢救旧的记忆：仅当它仍是一个**属于当前 key（显示器 + Tag）**的有效平铺
+        //    窗口时才存入平铺专有记忆。过期历史（已移走 / 已关闭 / 已转悬浮）不得覆盖
+        //    正确的平铺焦点记忆。
+        let prev = self.tag_focus_history.get(&key).cloned();
+        if let Some(prev) = prev {
+            let (out_id, tags) = &key;
+            if prev != *win_id
+                && self.windows.iter().any(|w| {
+                    w.id == prev
+                        && !w.is_floating
+                        && !w.is_minimized
+                        && w.output.as_ref() == Some(out_id)
+                        && (w.tags & *tags) != 0
+                })
+            {
+                self.tag_tiled_focus_history.insert(key.clone(), prev);
+            }
+        }
+
+        // 2. 同步总记忆。
+        self.tag_focus_history.insert(key.clone(), win_id.clone());
+
+        // 3. 当前窗口本身是有效平铺窗口时，直接刷新平铺记忆。
+        if let Some((false, false)) = meta {
+            self.tag_tiled_focus_history.insert(key, win_id.clone());
+        }
+    }
+
+    /// 依据窗口自身的 (显示器, Tag) 记录焦点记忆。
+    pub fn record_tag_focus(&mut self, win_id: &ObjectId) {
+        let key = self
+            .windows
+            .iter()
+            .find(|w| &w.id == win_id)
+            .and_then(|w| w.output.as_ref().map(|o| (o.clone(), w.tags)));
+        if let Some(key) = key {
+            self.record_tag_focus_at(win_id, key);
+        }
+    }
+
+    /// 取回当前 (显示器, Tag) 下「最近聚焦的有效平铺窗口」（若它仍然存在）。
+    ///
+    /// 除了校验窗口仍存在、未被最小化、仍是平铺状态外，还必须确认它**仍属于该记忆
+    /// 对应的显示器与 Tag**——窗口被移动到别的显示器 / 别的 Tag 后，旧的记忆条目会
+    /// 残留，若不校验就会把焦点恢复到另一个显示器上的窗口。
+    pub fn last_tiled_focus(&self, key: &(String, u32)) -> Option<ObjectId> {
+        let (out_id, tags) = key;
+        self.tag_tiled_focus_history
+            .get(key)
+            .cloned()
+            .filter(|id| {
+                self.windows.iter().any(|w| {
+                    &w.id == id
+                        && !w.is_floating
+                        && !w.is_minimized
+                        && w.output.as_ref() == Some(out_id)
+                        && (w.tags & *tags) != 0
+                })
+            })
+    }
+
+    /// 解析当前 BSP 树中有效的「平铺插入目标」。
+    ///
+    /// 优先使用同一显示器、同一 Tag 下最近聚焦的平铺窗口；如果焦点历史指向
+    /// 悬浮窗口、已关闭窗口或不在当前 BSP 树中的窗口，则回退到树中的有效平铺叶节点。
+    /// 返回 `None` 表示该树中没有任何可用的平铺窗口（调用方应直接把新窗口作为树根）。
+    fn resolve_tiling_target(
+        &self,
+        root: &LayoutNode,
+        tree_key: &(String, u32),
+        exclude: &ObjectId,
+    ) -> Option<ObjectId> {
+        // 候选校验：与 `fallback_tiling_target` 保持完全一致的规则——
+        // 不等于 exclude、确实位于当前 BSP 树、仍存在于 windows、非悬浮、未最小化，
+        // 并且仍属于 tree_key 对应的显示器与 Tag。
+        let (out_id, tags) = tree_key;
+        let is_valid = |id: &ObjectId| -> bool {
+            id != exclude
+                && root.contains(id)
+                && self.windows.iter().any(|w| {
+                    w.id == *id
+                        && !w.is_floating
+                        && !w.is_minimized
+                        && w.output.as_ref() == Some(out_id)
+                        && (w.tags & *tags) != 0
+                })
+        };
+
+        // 1. 优先：同一 (显示器, Tag) 下最近聚焦的平铺窗口（专有记忆，不会被悬浮窗覆盖）。
+        if let Some(id) = self.last_tiled_focus(tree_key) {
+            if is_valid(&id) {
+                return Some(id);
+            }
+        }
+
+        // 2. 次选：总焦点历史里仍然有效的平铺窗口。
+        if let Some(id) = self.tag_focus_history.get(tree_key) {
+            if is_valid(id) {
+                return Some(id.clone());
+            }
+        }
+
+        // 3. 再次：当前全局聚焦窗口（若它恰好在同一棵树里）。
+        if let Some(id) = &self.focused_window {
+            if is_valid(id) {
+                return Some(id.clone());
+            }
+        }
+
+        // 4. 兜底：树中任意有效叶节点，优先取「最近插入」的最后一个叶节点。
+        let mut leaves = Vec::new();
+        root.collect_leaves(&mut leaves);
+        leaves.iter().rev().find(|id| is_valid(id)).cloned()
+    }
+
+    /// 当 `resolve_tiling_target` 无法给出有效目标时的兜底。
+    ///
+    /// 候选必须全部满足：不等于 `exclude`、**确实来自当前 BSP 树**、仍存在于
+    /// `windows`、仍属于 `tree_key` 对应的显示器与 Tag、非悬浮且未最小化。
+    /// 返回 `None` 表示该树中没有任何有效的旧平铺窗口，调用方应把新窗口作为树根，
+    /// 而不能再拿悬浮窗 / 不在树中的窗口当插入目标去触发整树合并。
+    fn fallback_tiling_target(
+        &self,
+        root: &LayoutNode,
+        tree_key: &(String, u32),
+        exclude: &ObjectId,
+    ) -> Option<ObjectId> {
+        let (out_id, tags) = tree_key;
+        let mut leaves = Vec::new();
+        root.collect_leaves(&mut leaves);
+        leaves.into_iter().find(|id| {
+            id != exclude
+                && root.contains(id)
+                && self.windows.iter().any(|w| {
+                    w.id == *id
+                        && !w.is_floating
+                        && !w.is_minimized
+                        && w.output.as_ref() == Some(out_id)
+                        && (w.tags & *tags) != 0
+                })
+        })
     }
 }

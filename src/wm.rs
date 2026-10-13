@@ -232,6 +232,9 @@ pub struct AppState {
     pub current_width: i32,
     pub current_height: i32,
     pub tag_focus_history: HashMap<(String, u32), ObjectId>,
+    /// 每个 (显示器, Tag) 下「最近聚焦的平铺窗口」记忆。
+    /// 悬浮窗口夺焦时不会覆盖它，因此悬浮启动器关闭后仍能回到原来的平铺窗口。
+    pub tag_tiled_focus_history: HashMap<(String, u32), ObjectId>,
     pub last_geometry: HashMap<ObjectId, Geometry>,
     pub focused_window: Option<ObjectId>,
     pub focused_tags: u32,
@@ -582,7 +585,27 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                     candidate = target.map(|w| w.id.clone());
                                 }
                             }
-                            // 3. 悬浮层彻底空了，找平铺窗保底
+                            // 3. 悬浮层彻底空了：优先恢复到「最近聚焦的平铺窗口」记忆，
+                            //    否则才保底找任意平铺窗（避免退化成 BSP 树左上角的窗口）
+                            if candidate.is_none() {
+                                candidate = state
+                                    .focused_output
+                                    .as_ref()
+                                    .and_then(|out_id| {
+                                        state
+                                            .last_tiled_focus(&(out_id.clone(), state.focused_tags))
+                                    })
+                                    .filter(|hid| {
+                                        state.windows.iter().any(|w| {
+                                            &w.id == hid
+                                                && (w.tags & state.focused_tags) != 0
+                                                && !w.is_floating
+                                                && !w.is_minimized // 幽灵防御
+                                                && w.output.as_deref()
+                                                    == state.focused_output.as_deref()
+                                        })
+                                    });
+                            }
                             if candidate.is_none() {
                                 candidate = state
                                     .windows
@@ -637,6 +660,26 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                                             w.id == *hid && !w.is_floating && !w.is_minimized
                                         }) {
                                             candidate = Some(hid.clone());
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 1.5 平铺记忆恢复：总历史被悬浮窗/已关闭窗口污染时的后备
+                            if candidate.is_none() {
+                                if let Some(out_id) = &state.focused_output {
+                                    if let Some(hid) =
+                                        state.last_tiled_focus(&(out_id.clone(), state.focused_tags))
+                                    {
+                                        if let Some(_w) = state.windows.iter().find(|w| {
+                                            w.id == hid
+                                                && (w.tags & state.focused_tags) != 0
+                                                // 必须仍在同一显示器上，避免恢复到别的屏幕的窗口
+                                                && w.output.as_ref() == Some(out_id)
+                                                && !w.is_floating
+                                                && !w.is_minimized
+                                        }) {
+                                            candidate = Some(hid);
                                         }
                                     }
                                 }
@@ -1578,12 +1621,11 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                 state.focused_window = Some(id.clone());
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
                     state.focused_window = Some(id.clone());
+                    let win_tags = w_info.tags;
                     // 同步更新当前活跃显示器
-                    if let Some(out_id) = &w_info.output {
+                    if let Some(out_id) = w_info.output.clone() {
                         state.focused_output = Some(out_id.clone());
-                        state
-                            .tag_focus_history
-                            .insert((out_id.clone(), w_info.tags), id.clone());
+                        state.record_tag_focus_at(&id, (out_id, win_tags));
                     }
                 }
             }
@@ -1669,9 +1711,11 @@ impl Dispatch<RiverSeatV1, ()> for AppState {
                             w.tags = new_out_tags;
 
                             // 3. 更新全局焦点状态和新屏幕的焦点历史
-                            state
-                                .tag_focus_history
-                                .insert((new_out_name.clone(), new_out_tags), w.id.clone());
+                            let moved_id = w.id.clone();
+                            state.record_tag_focus_at(
+                                &moved_id,
+                                (new_out_name.clone(), new_out_tags),
+                            );
                             state.focused_output = Some(new_out_name);
                             state.focused_tags = new_out_tags;
                         }
@@ -1723,6 +1767,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                 state.minimized_slots.retain(|_, v| *v != id);
                 if let Some(w_info) = state.windows.iter().find(|w| w.id == id) {
                     let win_tag = w_info.tags;
+                    let win_out = w_info.output.clone();
 
                     // --- 标记关闭窗口的层级 ---
                     let was_floating = w_info.is_floating;
@@ -1734,7 +1779,7 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                     // 既然是关闭窗口，清除方向意图
                     state.pending_focus_dir = None;
 
-                    if let Some(out_id) = &w_info.output {
+                    if let Some(out_id) = &win_out {
                         let tree_key = (out_id.clone(), win_tag);
                         // 1. 从树中移除
                         if let Some(root) = state.layout_roots.remove(&tree_key) {
@@ -1748,20 +1793,43 @@ impl Dispatch<RiverWindowV1, ()> for AppState {
                             state.tag_focus_history.remove(&tree_key);
 
                             // 找接班人：优先找同一层级的（平铺找平铺，悬浮找悬浮）
-                            let replacement = state
+                            let mut replacement = state
                                 .windows
                                 .iter()
                                 .find(|w| {
                                     w.id != id
                                         && (w.tags & win_tag) != 0
                                         && w.output.as_ref() == Some(out_id)
+                                        && !w.is_minimized // 幽灵防御
                                         && w.is_floating == was_floating // 保证层级一致
                                 })
                                 .map(|w| w.id.clone());
 
-                            if let Some(rid) = replacement {
-                                state.tag_focus_history.insert(tree_key, rid);
+                            // 同层级没有接班人时（典型场景：悬浮启动器关闭后悬浮层空了），
+                            // 回退到「最近聚焦的平铺窗口」记忆，保证焦点回到原来的平铺窗口 B，
+                            // 而不是退化成 BSP 树左上角的窗口。
+                            if replacement.is_none() {
+                                replacement = state.last_tiled_focus(&tree_key).filter(|rid| {
+                                    *rid != id
+                                        && state.windows.iter().any(|w| {
+                                            &w.id == rid
+                                                && (w.tags & win_tag) != 0
+                                                && w.output.as_ref() == Some(out_id)
+                                                && !w.is_floating
+                                                && !w.is_minimized
+                                        })
+                                });
                             }
+
+                            // 统一的记忆写入：顺带刷新平铺专有记忆
+                            if let Some(rid) = replacement {
+                                state.record_tag_focus(&rid);
+                            }
+                        }
+
+                        // 3. 平铺记忆若指向被关闭的窗口，同步清理
+                        if state.tag_tiled_focus_history.get(&tree_key) == Some(&id) {
+                            state.tag_tiled_focus_history.remove(&tree_key);
                         }
                     }
                 }

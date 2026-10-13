@@ -84,6 +84,7 @@ fn main() {
         current_width: 0,
         current_height: 0,
         tag_focus_history: HashMap::new(),
+        tag_tiled_focus_history: HashMap::new(),
         last_geometry: HashMap::new(),
         focused_window: None,
         focused_tags: 1,
